@@ -27,10 +27,10 @@ jobs:
         # run: cargo build -p zed
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
 
-      - name: Create MSI installer
-        run: |
-          cargo install cargo-wix
-          cargo wix -p zed --nocapture --target x86_64-pc-windows-msvc
+      # - name: Create MSI installer
+      #   run: |
+      #     cargo install cargo-wix
+      #     cargo wix -p zed --nocapture --target x86_64-pc-windows-msvc || true
 
       - name: Upload the built artifacts
         uses: actions/upload-artifact@v4
