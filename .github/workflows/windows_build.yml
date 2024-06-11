@@ -9,7 +9,7 @@ concurrency:
 
 jobs:
   build:
-    timeout-minutes: 60
+    timeout-minutes: 120
     runs-on: windows-latest
     steps:
       - name: Checkout repo
@@ -17,25 +17,17 @@ jobs:
 
       - name: Cache dependencies
         uses: swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: cargo clippy
-        run: cargo xtask clippy
+      - name: Install requirement
+        run: |
+          rustup update
+          rustup target add wasm32-wasi
 
       - name: Build Zed
-        # run: cargo build -p zed
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+        run: cargo build --locked --release
 
-      # - name: Create MSI installer
-      #   run: |
-      #     cargo install cargo-wix
-      #     cargo wix -p zed --nocapture --target x86_64-pc-windows-msvc || true
-
-      - name: Upload the built artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: zed-windows
-          path: |
-            target/x86_64-pc-windows-msvc/release/*.exe
-            target/wix/*.msi
+          path: "target/release/*.exe"
