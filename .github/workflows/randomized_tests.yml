@@ -3,9 +3,10 @@ name: Randomized Tests
 concurrency: randomized-tests
 
 on:
-  push:
-    branches:
-      - randomized-tests-runner
+  workflow_dispatch:
+  # push:
+  #   branches:
+  #     - randomized-tests-runner
   # schedule:
   #    - cron: '0 * * * *'
 

@@ -1,9 +1,10 @@
 name: Publish zed-extension CLI
 
 on:
-  push:
-    tags:
-      - extension-cli
+  workflow_dispatch:
+  # push:
+  #   tags:
+  #     - extension-cli
 
 env:
   CARGO_TERM_COLOR: always
