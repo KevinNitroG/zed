@@ -1,4 +1,5 @@
 use gpui::{svg, AnimationElement, Hsla, IntoElement, Rems, Transformation};
+use serde::{Deserialize, Serialize};
 use strum::EnumIter;
 
 use crate::{prelude::*, Indicator};
@@ -76,7 +77,7 @@ impl IconSize {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, EnumIter)]
+#[derive(Debug, PartialEq, Copy, Clone, EnumIter, Serialize, Deserialize)]
 pub enum IconName {
     Ai,
     ArrowCircle,
@@ -117,6 +118,7 @@ pub enum IconName {
     Dash,
     Delete,
     Disconnected,
+    Download,
     Ellipsis,
     Envelope,
     Escape,
@@ -248,6 +250,7 @@ impl IconName {
             IconName::Dash => "icons/dash.svg",
             IconName::Delete => "icons/delete.svg",
             IconName::Disconnected => "icons/disconnected.svg",
+            IconName::Download => "icons/download.svg",
             IconName::Ellipsis => "icons/ellipsis.svg",
             IconName::Envelope => "icons/feedback.svg",
             IconName::Escape => "icons/escape.svg",
