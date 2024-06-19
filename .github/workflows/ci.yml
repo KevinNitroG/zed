@@ -52,6 +52,9 @@ jobs:
       - name: Check unused dependencies
         uses: bnjbvr/cargo-machete@main
 
+      - name: Check licenses are present
+        run: script/check-licenses
+
       - name: Check license generation
         run: script/generate-licenses /tmp/zed_licenses_output
 
@@ -88,7 +91,7 @@ jobs:
           clean: false
 
       - name: cargo clippy
-        run: cargo xtask clippy
+        run: ./script/clippy
 
       - name: Run tests
         uses: ./.github/actions/run_tests
@@ -115,7 +118,7 @@ jobs:
           clean: false
 
       - name: cargo clippy
-        run: cargo xtask clippy
+        run: ./script/clippy
 
       - name: Run tests
         uses: ./.github/actions/run_tests
@@ -140,7 +143,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo clippy
-        run: cargo xtask clippy
+        run: ./script/clippy
 
       - name: Build Zed
         run: cargo build -p zed

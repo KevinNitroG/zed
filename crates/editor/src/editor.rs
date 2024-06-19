@@ -537,6 +537,7 @@ pub struct Editor {
     show_git_blame_inline: bool,
     show_git_blame_inline_delay_task: Option<Task<()>>,
     git_blame_inline_enabled: bool,
+    show_selection_menu: Option<bool>,
     blame: Option<Model<GitBlame>>,
     blame_subscription: Option<Subscription>,
     custom_context_menu: Option<
@@ -551,6 +552,7 @@ pub struct Editor {
     tasks_update_task: Option<Task<()>>,
     previous_search_ranges: Option<Arc<[Range<Anchor>]>>,
     file_header_size: u8,
+    breadcrumb_header: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1833,6 +1835,7 @@ impl Editor {
             custom_context_menu: None,
             show_git_blame_gutter: false,
             show_git_blame_inline: false,
+            show_selection_menu: None,
             show_git_blame_inline_delay_task: None,
             git_blame_inline_enabled: ProjectSettings::get_global(cx).git.inline_blame_enabled(),
             blame: None,
@@ -1861,6 +1864,7 @@ impl Editor {
             tasks_update_task: None,
             linked_edit_ranges: Default::default(),
             previous_search_ranges: None,
+            breadcrumb_header: None,
         };
         this.tasks_update_task = Some(this.refresh_runnables(cx));
         this._subscriptions.extend(project_subscriptions);
@@ -2210,7 +2214,7 @@ impl Editor {
         // Copy selections to primary selection buffer
         #[cfg(target_os = "linux")]
         if local {
-            let selections = self.selections.all::<usize>(cx);
+            let selections = &self.selections.disjoint;
             let buffer_handle = self.buffer.read(cx).read(cx);
 
             let mut text = String::new();
@@ -6718,6 +6722,20 @@ impl Editor {
         })
     }
 
+    pub fn select_page_up(&mut self, _: &SelectPageUp, cx: &mut ViewContext<Self>) {
+        let Some(row_count) = self.visible_row_count() else {
+            return;
+        };
+
+        let text_layout_details = &self.text_layout_details(cx);
+
+        self.change_selections(Some(Autoscroll::fit()), cx, |s| {
+            s.move_heads_with(|map, head, goal| {
+                movement::up_by_rows(map, head, row_count, goal, false, &text_layout_details)
+            })
+        })
+    }
+
     pub fn move_page_up(&mut self, action: &MovePageUp, cx: &mut ViewContext<Self>) {
         if self.take_rename(true, cx).is_some() {
             return;
@@ -6728,9 +6746,7 @@ impl Editor {
             return;
         }
 
-        let row_count = if let Some(row_count) = self.visible_line_count() {
-            row_count as u32 - 1
-        } else {
+        let Some(row_count) = self.visible_row_count() else {
             return;
         };
 
@@ -6805,6 +6821,20 @@ impl Editor {
         }
     }
 
+    pub fn select_page_down(&mut self, _: &SelectPageDown, cx: &mut ViewContext<Self>) {
+        let Some(row_count) = self.visible_row_count() else {
+            return;
+        };
+
+        let text_layout_details = &self.text_layout_details(cx);
+
+        self.change_selections(Some(Autoscroll::fit()), cx, |s| {
+            s.move_heads_with(|map, head, goal| {
+                movement::down_by_rows(map, head, row_count, goal, false, &text_layout_details)
+            })
+        })
+    }
+
     pub fn move_page_down(&mut self, action: &MovePageDown, cx: &mut ViewContext<Self>) {
         if self.take_rename(true, cx).is_some() {
             return;
@@ -6825,9 +6855,7 @@ impl Editor {
             return;
         }
 
-        let row_count = if let Some(row_count) = self.visible_line_count() {
-            row_count as u32 - 1
-        } else {
+        let Some(row_count) = self.visible_row_count() else {
             return;
         };
 
@@ -10182,6 +10210,20 @@ impl Editor {
         self.git_blame_inline_enabled
     }
 
+    pub fn toggle_selection_menu(&mut self, _: &ToggleSelectionMenu, cx: &mut ViewContext<Self>) {
+        self.show_selection_menu = self
+            .show_selection_menu
+            .map(|show_selections_menu| !show_selections_menu)
+            .or_else(|| Some(!EditorSettings::get_global(cx).toolbar.selections_menu));
+
+        cx.notify();
+    }
+
+    pub fn selection_menu_enabled(&self, cx: &AppContext) -> bool {
+        self.show_selection_menu
+            .unwrap_or_else(|| EditorSettings::get_global(cx).toolbar.selections_menu)
+    }
+
     fn start_git_blame(&mut self, user_triggered: bool, cx: &mut ViewContext<Self>) {
         if let Some(project) = self.project.as_ref() {
             let Some(buffer) = self.buffer().read(cx).as_singleton() else {
@@ -10487,6 +10529,10 @@ impl Editor {
             |colors| colors.editor_document_highlight_read_background,
             cx,
         )
+    }
+
+    pub fn set_breadcrumb_header(&mut self, new_header: String) {
+        self.breadcrumb_header = Some(new_header);
     }
 
     pub fn clear_search_within_ranges(&mut self, cx: &mut ViewContext<Self>) {

@@ -67,7 +67,8 @@ use lsp_command::*;
 use node_runtime::NodeRuntime;
 use parking_lot::{Mutex, RwLock};
 use paths::{
-    LOCAL_SETTINGS_RELATIVE_PATH, LOCAL_TASKS_RELATIVE_PATH, LOCAL_VSCODE_TASKS_RELATIVE_PATH,
+    local_settings_file_relative_path, local_tasks_file_relative_path,
+    local_vscode_tasks_file_relative_path,
 };
 use postage::watch;
 use prettier_support::{DefaultPrettier, PrettierInstance};
@@ -4148,20 +4149,34 @@ impl Project {
             .collect::<HashSet<_>>();
 
         for server_id in servers {
-            let status = self.language_server_statuses.get(&server_id);
-            let server = self.language_servers.get(&server_id);
-            if let Some((server, status)) = server.zip(status) {
-                if let LanguageServerState::Running { server, .. } = server {
-                    for (token, progress) in &status.pending_work {
-                        if progress.is_cancellable {
-                            server
-                                .notify::<lsp::notification::WorkDoneProgressCancel>(
-                                    WorkDoneProgressCancelParams {
-                                        token: lsp::NumberOrString::String(token.clone()),
-                                    },
-                                )
-                                .ok();
+            self.cancel_language_server_work(server_id, None, cx);
+        }
+    }
+
+    pub fn cancel_language_server_work(
+        &mut self,
+        server_id: LanguageServerId,
+        token_to_cancel: Option<String>,
+        _cx: &mut ModelContext<Self>,
+    ) {
+        let status = self.language_server_statuses.get(&server_id);
+        let server = self.language_servers.get(&server_id);
+        if let Some((server, status)) = server.zip(status) {
+            if let LanguageServerState::Running { server, .. } = server {
+                for (token, progress) in &status.pending_work {
+                    if let Some(token_to_cancel) = token_to_cancel.as_ref() {
+                        if token != token_to_cancel {
+                            continue;
                         }
+                    }
+                    if progress.is_cancellable {
+                        server
+                            .notify::<lsp::notification::WorkDoneProgressCancel>(
+                                WorkDoneProgressCancelParams {
+                                    token: lsp::NumberOrString::String(token.clone()),
+                                },
+                            )
+                            .ok();
                     }
                 }
             }
@@ -4579,8 +4594,10 @@ impl Project {
 
     pub fn language_server_statuses(
         &self,
-    ) -> impl DoubleEndedIterator<Item = &LanguageServerStatus> {
-        self.language_server_statuses.values()
+    ) -> impl DoubleEndedIterator<Item = (LanguageServerId, &LanguageServerStatus)> {
+        self.language_server_statuses
+            .iter()
+            .map(|(key, value)| (*key, value))
     }
 
     pub fn last_formatting_failure(&self) -> Option<&str> {
@@ -8176,10 +8193,10 @@ impl Project {
                 }
             };
 
-            if abs_path.ends_with(&*LOCAL_SETTINGS_RELATIVE_PATH) {
+            if abs_path.ends_with(local_settings_file_relative_path()) {
                 let settings_dir = Arc::from(
                     path.ancestors()
-                        .nth(LOCAL_SETTINGS_RELATIVE_PATH.components().count())
+                        .nth(local_settings_file_relative_path().components().count())
                         .unwrap(),
                 );
                 let fs = self.fs.clone();
@@ -8193,7 +8210,7 @@ impl Project {
                         },
                     )
                 });
-            } else if abs_path.ends_with(&*LOCAL_TASKS_RELATIVE_PATH) {
+            } else if abs_path.ends_with(local_tasks_file_relative_path()) {
                 self.task_inventory().update(cx, |task_inventory, cx| {
                     if removed {
                         task_inventory.remove_local_static_source(&abs_path);
@@ -8213,7 +8230,7 @@ impl Project {
                         );
                     }
                 })
-            } else if abs_path.ends_with(&*LOCAL_VSCODE_TASKS_RELATIVE_PATH) {
+            } else if abs_path.ends_with(local_vscode_tasks_file_relative_path()) {
                 self.task_inventory().update(cx, |task_inventory, cx| {
                     if removed {
                         task_inventory.remove_local_static_source(&abs_path);
