@@ -3,9 +3,6 @@ name: Windows Build
 on:
   workflow_dispatch:
   workflow_call:
-  watch:
-    types:
-      - started
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
