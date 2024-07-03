@@ -1,13 +1,14 @@
-use html_to_markdown::{convert_html_to_markdown, TagHandler};
-use std::cell::RefCell;
+mod hexdocs;
+
 use std::fs;
-use std::rc::Rc;
 use zed::lsp::CompletionKind;
 use zed::{
-    CodeLabel, CodeLabelSpan, LanguageServerId, SlashCommand, SlashCommandOutput,
-    SlashCommandOutputSection,
+    CodeLabel, CodeLabelSpan, HttpRequest, KeyValueStore, LanguageServerId, SlashCommand,
+    SlashCommandOutput, SlashCommandOutputSection,
 };
-use zed_extension_api::{self as zed, fetch, HttpRequest, Result};
+use zed_extension_api::{self as zed, Result};
+
+use crate::hexdocs::convert_hexdocs_to_markdown;
 
 struct GleamExtension {
     cached_binary_path: Option<String>,
@@ -180,7 +181,7 @@ impl zed::Extension for GleamExtension {
                     .ok_or_else(|| "missing package name".to_string())?;
                 let module_path = components.map(ToString::to_string).collect::<Vec<_>>();
 
-                let response = fetch(&HttpRequest {
+                let response = zed::fetch(&HttpRequest {
                     url: format!(
                         "https://hexdocs.pm/{package_name}{maybe_path}",
                         maybe_path = if !module_path.is_empty() {
@@ -191,19 +192,7 @@ impl zed::Extension for GleamExtension {
                     ),
                 })?;
 
-                let mut handlers: Vec<TagHandler> = vec![
-                    Rc::new(RefCell::new(
-                        html_to_markdown::markdown::WebpageChromeRemover,
-                    )),
-                    Rc::new(RefCell::new(html_to_markdown::markdown::ParagraphHandler)),
-                    Rc::new(RefCell::new(html_to_markdown::markdown::HeadingHandler)),
-                    Rc::new(RefCell::new(html_to_markdown::markdown::ListHandler)),
-                    Rc::new(RefCell::new(html_to_markdown::markdown::TableHandler::new())),
-                    Rc::new(RefCell::new(html_to_markdown::markdown::StyledTextHandler)),
-                ];
-
-                let markdown = convert_html_to_markdown(response.body.as_bytes(), &mut handlers)
-                    .map_err(|err| format!("failed to convert docs to Markdown {err}"))?;
+                let (markdown, _modules) = convert_hexdocs_to_markdown(response.body.as_bytes())?;
 
                 let mut text = String::new();
                 text.push_str(&markdown);
@@ -234,6 +223,18 @@ impl zed::Extension for GleamExtension {
                 })
             }
             command => Err(format!("unknown slash command: \"{command}\"")),
+        }
+    }
+
+    fn index_docs(
+        &self,
+        provider: String,
+        package: String,
+        database: &KeyValueStore,
+    ) -> Result<(), String> {
+        match provider.as_str() {
+            "gleam-hexdocs" => hexdocs::index(package, database),
+            _ => Ok(()),
         }
     }
 }
