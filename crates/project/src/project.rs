@@ -355,6 +355,9 @@ pub enum Event {
     },
     CollaboratorJoined(proto::PeerId),
     CollaboratorLeft(proto::PeerId),
+    HostReshared,
+    Reshared,
+    Rejoined,
     RefreshInlayHints,
     RevealInProjectPanel(ProjectEntryId),
     SnippetEdit(BufferId, Vec<(lsp::Range, Snippet)>),
@@ -1716,6 +1719,7 @@ impl Project {
         self.shared_buffers.clear();
         self.set_collaborators_from_proto(message.collaborators, cx)?;
         self.metadata_changed(cx);
+        cx.emit(Event::Reshared);
         Ok(())
     }
 
@@ -1753,6 +1757,7 @@ impl Project {
             .collect();
         self.enqueue_buffer_ordered_message(BufferOrderedMessage::Resync)
             .unwrap();
+        cx.emit(Event::Rejoined);
         cx.notify();
         Ok(())
     }
@@ -1805,9 +1810,11 @@ impl Project {
                 }
             }
 
-            self.client.send(proto::UnshareProject {
-                project_id: remote_id,
-            })?;
+            self.client
+                .send(proto::UnshareProject {
+                    project_id: remote_id,
+                })
+                .ok();
 
             Ok(())
         } else {
@@ -3676,29 +3683,26 @@ impl Project {
                     let this = this.clone();
                     let name = name.to_string();
                     async move {
-                        if let Some(actions) = params.actions {
-                            let (tx, mut rx) = smol::channel::bounded(1);
-                            let request = LanguageServerPromptRequest {
-                                level: match params.typ {
-                                    lsp::MessageType::ERROR => PromptLevel::Critical,
-                                    lsp::MessageType::WARNING => PromptLevel::Warning,
-                                    _ => PromptLevel::Info,
-                                },
-                                message: params.message,
-                                actions,
-                                response_channel: tx,
-                                lsp_name: name.clone(),
-                            };
+                        let actions = params.actions.unwrap_or_default();
+                        let (tx, mut rx) = smol::channel::bounded(1);
+                        let request = LanguageServerPromptRequest {
+                            level: match params.typ {
+                                lsp::MessageType::ERROR => PromptLevel::Critical,
+                                lsp::MessageType::WARNING => PromptLevel::Warning,
+                                _ => PromptLevel::Info,
+                            },
+                            message: params.message,
+                            actions,
+                            response_channel: tx,
+                            lsp_name: name.clone(),
+                        };
 
-                            if let Ok(_) = this.update(&mut cx, |_, cx| {
-                                cx.emit(Event::LanguageServerPrompt(request));
-                            }) {
-                                let response = rx.next().await;
+                        if let Ok(_) = this.update(&mut cx, |_, cx| {
+                            cx.emit(Event::LanguageServerPrompt(request));
+                        }) {
+                            let response = rx.next().await;
 
-                                Ok(response)
-                            } else {
-                                Ok(None)
-                            }
+                            Ok(response)
                         } else {
                             Ok(None)
                         }
@@ -3753,7 +3757,33 @@ impl Project {
                 }
             })
             .detach();
+        language_server
+            .on_notification::<lsp::notification::ShowMessage, _>({
+                let this = this.clone();
+                let name = name.to_string();
+                move |params, mut cx| {
+                    let this = this.clone();
+                    let name = name.to_string();
 
+                    let (tx, _) = smol::channel::bounded(1);
+                    let request = LanguageServerPromptRequest {
+                        level: match params.typ {
+                            lsp::MessageType::ERROR => PromptLevel::Critical,
+                            lsp::MessageType::WARNING => PromptLevel::Warning,
+                            _ => PromptLevel::Info,
+                        },
+                        message: params.message,
+                        actions: vec![],
+                        response_channel: tx,
+                        lsp_name: name.clone(),
+                    };
+
+                    let _ = this.update(&mut cx, |_, cx| {
+                        cx.emit(Event::LanguageServerPrompt(request));
+                    });
+                }
+            })
+            .detach();
         language_server
             .on_notification::<lsp::notification::Progress, _>(move |params, mut cx| {
                 if let Some(this) = this.upgrade() {
@@ -4076,6 +4106,7 @@ impl Project {
             return;
         }
 
+        #[allow(clippy::mutable_key_type)]
         let language_server_lookup_info: HashSet<(Model<Worktree>, Arc<Language>)> = buffers
             .into_iter()
             .filter_map(|buffer| {
@@ -8787,6 +8818,7 @@ impl Project {
                     .retain(|_, buffer| !matches!(buffer, OpenBuffer::Operations(_)));
                 this.enqueue_buffer_ordered_message(BufferOrderedMessage::Resync)
                     .unwrap();
+                cx.emit(Event::HostReshared);
             }
 
             cx.emit(Event::CollaboratorUpdated {
@@ -11035,6 +11067,7 @@ async fn populate_labels_for_symbols(
     lsp_adapter: Option<Arc<CachedLspAdapter>>,
     output: &mut Vec<Symbol>,
 ) {
+    #[allow(clippy::mutable_key_type)]
     let mut symbols_by_language = HashMap::<Option<Arc<Language>>, Vec<CoreSymbol>>::default();
 
     let mut unknown_path = None;

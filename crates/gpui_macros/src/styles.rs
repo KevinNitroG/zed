@@ -2,15 +2,38 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
+    braced,
     parse::{Parse, ParseStream, Result},
-    parse_macro_input,
+    parse_macro_input, Token, Visibility,
 };
 
-struct StyleableMacroInput;
+#[derive(Debug)]
+struct StyleableMacroInput {
+    method_visibility: Visibility,
+}
 
 impl Parse for StyleableMacroInput {
-    fn parse(_input: ParseStream) -> Result<Self> {
-        Ok(StyleableMacroInput)
+    fn parse(input: ParseStream) -> Result<Self> {
+        if !input.peek(syn::token::Brace) {
+            return Ok(Self {
+                method_visibility: Visibility::Inherited,
+            });
+        }
+
+        let content;
+        braced!(content in input);
+
+        let mut method_visibility = None;
+
+        let ident: syn::Ident = content.parse()?;
+        if ident == "visibility" {
+            let _colon: Token![:] = content.parse()?;
+            method_visibility = Some(content.parse()?);
+        }
+
+        Ok(Self {
+            method_visibility: method_visibility.unwrap_or(Visibility::Inherited),
+        })
     }
 }
 
@@ -24,11 +47,444 @@ pub fn style_helpers(input: TokenStream) -> TokenStream {
     output.into()
 }
 
-fn generate_methods() -> Vec<TokenStream2> {
+pub fn visibility_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let visibility = input.method_visibility;
+    let output = quote! {
+        /// Sets the visibility of the element to `visible`.
+        /// [Docs](https://tailwindcss.com/docs/visibility)
+        #visibility fn visible(mut self) -> Self {
+            self.style().visibility = Some(gpui::Visibility::Visible);
+            self
+        }
+
+        /// Sets the visibility of the element to `hidden`.
+        /// [Docs](https://tailwindcss.com/docs/visibility)
+        #visibility fn invisible(mut self) -> Self {
+            self.style().visibility = Some(gpui::Visibility::Hidden);
+            self
+        }
+    };
+
+    output.into()
+}
+
+pub fn margin_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let methods = generate_box_style_methods(
+        margin_box_style_prefixes(),
+        box_style_suffixes(),
+        input.method_visibility,
+    );
+    let output = quote! {
+        #(#methods)*
+    };
+
+    output.into()
+}
+
+pub fn padding_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let methods = generate_box_style_methods(
+        padding_box_style_prefixes(),
+        box_style_suffixes(),
+        input.method_visibility,
+    );
+    let output = quote! {
+        #(#methods)*
+    };
+
+    output.into()
+}
+
+pub fn position_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let visibility = input.method_visibility;
+    let methods = generate_box_style_methods(
+        position_box_style_prefixes(),
+        box_style_suffixes(),
+        visibility.clone(),
+    );
+    let output = quote! {
+        /// Sets the position of the element to `relative`.
+        /// [Docs](https://tailwindcss.com/docs/position)
+        #visibility fn relative(mut self) -> Self {
+            self.style().position = Some(gpui::Position::Relative);
+            self
+        }
+
+        /// Sets the position of the element to `absolute`.
+        /// [Docs](https://tailwindcss.com/docs/position)
+        #visibility fn absolute(mut self) -> Self {
+            self.style().position = Some(gpui::Position::Absolute);
+            self
+        }
+
+        #(#methods)*
+    };
+
+    output.into()
+}
+
+pub fn overflow_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let visibility = input.method_visibility;
+    let output = quote! {
+        /// Sets the behavior of content that overflows the container to be hidden.
+        /// [Docs](https://tailwindcss.com/docs/overflow#hiding-content-that-overflows)
+        #visibility fn overflow_hidden(mut self) -> Self {
+            self.style().overflow.x = Some(gpui::Overflow::Hidden);
+            self.style().overflow.y = Some(gpui::Overflow::Hidden);
+            self
+        }
+
+        /// Sets the behavior of content that overflows the container on the X axis to be hidden.
+        /// [Docs](https://tailwindcss.com/docs/overflow#hiding-content-that-overflows)
+        #visibility fn overflow_x_hidden(mut self) -> Self {
+            self.style().overflow.x = Some(gpui::Overflow::Hidden);
+            self
+        }
+
+        /// Sets the behavior of content that overflows the container on the Y axis to be hidden.
+        /// [Docs](https://tailwindcss.com/docs/overflow#hiding-content-that-overflows)
+        #visibility fn overflow_y_hidden(mut self) -> Self {
+            self.style().overflow.y = Some(gpui::Overflow::Hidden);
+            self
+        }
+    };
+
+    output.into()
+}
+
+pub fn cursor_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let visibility = input.method_visibility;
+    let output = quote! {
+        /// Set the cursor style when hovering over this element
+        #visibility fn cursor(mut self, cursor: CursorStyle) -> Self {
+            self.style().mouse_cursor = Some(cursor);
+            self
+        }
+
+        /// Sets the cursor style when hovering an element to `default`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_default(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::Arrow);
+            self
+        }
+
+        /// Sets the cursor style when hovering an element to `pointer`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_pointer(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::PointingHand);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `text`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_text(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::IBeam);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `move`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_move(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ClosedHand);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `not-allowed`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_not_allowed(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::OperationNotAllowed);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `context-menu`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_context_menu(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ContextualMenu);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `crosshair`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_crosshair(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::Crosshair);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `vertical-text`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_vertical_text(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::IBeamCursorForVerticalLayout);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `alias`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_alias(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::DragLink);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `copy`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_copy(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::DragCopy);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `no-drop`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_no_drop(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::OperationNotAllowed);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `grab`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_grab(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::OpenHand);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `grabbing`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_grabbing(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ClosedHand);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `ew-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_ew_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeLeftRight);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `ns-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_ns_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeUpDown);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `col-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_col_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeColumn);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `row-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_row_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeRow);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `n-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_n_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeUp);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `e-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_e_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeRight);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `s-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_s_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeDown);
+            self
+        }
+
+        /// Sets cursor style when hovering over an element to `w-resize`.
+        /// [Docs](https://tailwindcss.com/docs/cursor)
+        #visibility fn cursor_w_resize(mut self) -> Self {
+            self.style().mouse_cursor = Some(gpui::CursorStyle::ResizeLeft);
+            self
+        }
+    };
+
+    output.into()
+}
+
+pub fn box_shadow_style_methods(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as StyleableMacroInput);
+    let visibility = input.method_visibility;
+    let output = quote! {
+        /// Sets the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow(mut self, shadows: smallvec::SmallVec<[gpui::BoxShadow; 2]>) -> Self {
+            self.style().box_shadow = Some(shadows);
+            self
+        }
+
+        /// Clears the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow_none(mut self) -> Self {
+            self.style().box_shadow = Some(Default::default());
+            self
+        }
+
+        /// Sets the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow_sm(mut self) -> Self {
+            use gpui::{BoxShadow, hsla, point, px};
+            use smallvec::smallvec;
+
+            self.style().box_shadow = Some(smallvec![BoxShadow {
+                color: hsla(0., 0., 0., 0.05),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(2.),
+                spread_radius: px(0.),
+            }]);
+            self
+        }
+
+        /// Sets the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow_md(mut self) -> Self {
+            use gpui::{BoxShadow, hsla, point, px};
+            use smallvec::smallvec;
+
+            self.style().box_shadow = Some(smallvec![
+                BoxShadow {
+                    color: hsla(0.5, 0., 0., 0.1),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(6.),
+                    spread_radius: px(-1.),
+                },
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(2.)),
+                    blur_radius: px(4.),
+                    spread_radius: px(-2.),
+                }
+            ]);
+            self
+        }
+
+        /// Sets the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow_lg(mut self) -> Self {
+            use gpui::{BoxShadow, hsla, point, px};
+            use smallvec::smallvec;
+
+            self.style().box_shadow = Some(smallvec![
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(10.)),
+                    blur_radius: px(15.),
+                    spread_radius: px(-3.),
+                },
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(6.),
+                    spread_radius: px(-4.),
+                }
+            ]);
+            self
+        }
+
+        /// Sets the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow_xl(mut self) -> Self {
+            use gpui::{BoxShadow, hsla, point, px};
+            use smallvec::smallvec;
+
+            self.style().box_shadow = Some(smallvec![
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(20.)),
+                    blur_radius: px(25.),
+                    spread_radius: px(-5.),
+                },
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.1),
+                    offset: point(px(0.), px(8.)),
+                    blur_radius: px(10.),
+                    spread_radius: px(-6.),
+                }
+            ]);
+            self
+        }
+
+        /// Sets the box shadow of the element.
+        /// [Docs](https://tailwindcss.com/docs/box-shadow)
+        #visibility fn shadow_2xl(mut self) -> Self {
+            use gpui::{BoxShadow, hsla, point, px};
+            use smallvec::smallvec;
+
+            self.style().box_shadow = Some(smallvec![BoxShadow {
+                color: hsla(0., 0., 0., 0.25),
+                offset: point(px(0.), px(25.)),
+                blur_radius: px(50.),
+                spread_radius: px(-12.),
+            }]);
+            self
+        }
+    };
+
+    output.into()
+}
+
+struct BoxStylePrefix {
+    prefix: &'static str,
+    auto_allowed: bool,
+    fields: Vec<TokenStream2>,
+    doc_string_prefix: &'static str,
+}
+
+struct BoxStyleSuffix {
+    suffix: &'static str,
+    length_tokens: TokenStream2,
+    doc_string_suffix: &'static str,
+}
+
+struct CornerStylePrefix {
+    prefix: &'static str,
+    fields: Vec<TokenStream2>,
+    doc_string_prefix: &'static str,
+}
+
+struct CornerStyleSuffix {
+    suffix: &'static str,
+    radius_tokens: TokenStream2,
+    doc_string_suffix: &'static str,
+}
+
+struct BorderStylePrefix {
+    prefix: &'static str,
+    fields: Vec<TokenStream2>,
+    doc_string_prefix: &'static str,
+}
+
+struct BorderStyleSuffix {
+    suffix: &'static str,
+    width_tokens: TokenStream2,
+    doc_string_suffix: &'static str,
+}
+
+fn generate_box_style_methods(
+    prefixes: Vec<BoxStylePrefix>,
+    suffixes: Vec<BoxStyleSuffix>,
+    visibility: Visibility,
+) -> Vec<TokenStream2> {
     let mut methods = Vec::new();
 
-    for box_style_prefix in box_prefixes() {
+    for box_style_prefix in prefixes {
         methods.push(generate_custom_value_setter(
+            visibility.clone(),
             box_style_prefix.prefix,
             if box_style_prefix.auto_allowed {
                 quote! { Length }
@@ -39,9 +495,10 @@ fn generate_methods() -> Vec<TokenStream2> {
             &box_style_prefix.doc_string_prefix,
         ));
 
-        for box_style_suffix in box_suffixes() {
+        for box_style_suffix in &suffixes {
             if box_style_suffix.suffix != "auto" || box_style_prefix.auto_allowed {
                 methods.push(generate_predefined_setter(
+                    visibility.clone(),
                     box_style_prefix.prefix,
                     box_style_suffix.suffix,
                     &box_style_prefix.fields,
@@ -57,6 +514,7 @@ fn generate_methods() -> Vec<TokenStream2> {
 
             if box_style_suffix.suffix != "auto" {
                 methods.push(generate_predefined_setter(
+                    visibility.clone(),
                     box_style_prefix.prefix,
                     box_style_suffix.suffix,
                     &box_style_prefix.fields,
@@ -72,8 +530,17 @@ fn generate_methods() -> Vec<TokenStream2> {
         }
     }
 
+    methods
+}
+
+fn generate_methods() -> Vec<TokenStream2> {
+    let visibility = Visibility::Inherited;
+    let mut methods =
+        generate_box_style_methods(box_prefixes(), box_style_suffixes(), visibility.clone());
+
     for corner_style_prefix in corner_prefixes() {
         methods.push(generate_custom_value_setter(
+            visibility.clone(),
             corner_style_prefix.prefix,
             quote! { AbsoluteLength },
             &corner_style_prefix.fields,
@@ -82,6 +549,7 @@ fn generate_methods() -> Vec<TokenStream2> {
 
         for corner_style_suffix in corner_suffixes() {
             methods.push(generate_predefined_setter(
+                visibility.clone(),
                 corner_style_prefix.prefix,
                 corner_style_suffix.suffix,
                 &corner_style_prefix.fields,
@@ -98,6 +566,7 @@ fn generate_methods() -> Vec<TokenStream2> {
 
     for border_style_prefix in border_prefixes() {
         methods.push(generate_custom_value_setter(
+            visibility.clone(),
             border_style_prefix.prefix,
             quote! { AbsoluteLength },
             &border_style_prefix.fields,
@@ -106,6 +575,7 @@ fn generate_methods() -> Vec<TokenStream2> {
 
         for border_style_suffix in border_suffixes() {
             methods.push(generate_predefined_setter(
+                visibility.clone(),
                 border_style_prefix.prefix,
                 border_style_suffix.suffix,
                 &border_style_prefix.fields,
@@ -123,6 +593,7 @@ fn generate_methods() -> Vec<TokenStream2> {
 }
 
 fn generate_predefined_setter(
+    visibility: Visibility,
     name: &'static str,
     length: &'static str,
     fields: &[TokenStream2],
@@ -153,7 +624,7 @@ fn generate_predefined_setter(
 
     let method = quote! {
         #[doc = #doc_string]
-        fn #method_name(mut self) -> Self {
+        #visibility fn #method_name(mut self) -> Self {
             let style = self.style();
             #(#field_assignments)*
             self
@@ -164,6 +635,7 @@ fn generate_predefined_setter(
 }
 
 fn generate_custom_value_setter(
+    visibility: Visibility,
     prefix: &str,
     length_type: TokenStream2,
     fields: &[TokenStream2],
@@ -186,7 +658,7 @@ fn generate_custom_value_setter(
 
     let method = quote! {
         #[doc = #doc_string]
-        fn #method_name(mut self, length: impl std::clone::Clone + Into<gpui::#length_type>) -> Self {
+        #visibility fn #method_name(mut self, length: impl std::clone::Clone + Into<gpui::#length_type>) -> Self {
             let style = self.style();
             #(#field_assignments)*
             self
@@ -196,11 +668,148 @@ fn generate_custom_value_setter(
     method
 }
 
-struct BoxStylePrefix {
-    prefix: &'static str,
-    auto_allowed: bool,
-    fields: Vec<TokenStream2>,
-    doc_string_prefix: &'static str,
+fn margin_box_style_prefixes() -> Vec<BoxStylePrefix> {
+    vec![
+        BoxStylePrefix {
+            prefix: "m",
+            auto_allowed: true,
+            fields: vec![
+                quote! { margin.top },
+                quote! { margin.bottom },
+                quote! { margin.left },
+                quote! { margin.right },
+            ],
+            doc_string_prefix: "Sets the margin of the element. [Docs](https://tailwindcss.com/docs/margin)",
+        },
+        BoxStylePrefix {
+            prefix: "mt",
+            auto_allowed: true,
+            fields: vec![quote! { margin.top }],
+            doc_string_prefix: "Sets the top margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
+        },
+        BoxStylePrefix {
+            prefix: "mb",
+            auto_allowed: true,
+            fields: vec![quote! { margin.bottom }],
+            doc_string_prefix: "Sets the bottom margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
+        },
+        BoxStylePrefix {
+            prefix: "my",
+            auto_allowed: true,
+            fields: vec![quote! { margin.top }, quote! { margin.bottom }],
+            doc_string_prefix: "Sets the vertical margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-vertical-margin)",
+        },
+        BoxStylePrefix {
+            prefix: "mx",
+            auto_allowed: true,
+            fields: vec![quote! { margin.left }, quote! { margin.right }],
+            doc_string_prefix: "Sets the horizontal margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-horizontal-margin)",
+        },
+        BoxStylePrefix {
+            prefix: "ml",
+            auto_allowed: true,
+            fields: vec![quote! { margin.left }],
+            doc_string_prefix: "Sets the left margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
+        },
+        BoxStylePrefix {
+            prefix: "mr",
+            auto_allowed: true,
+            fields: vec![quote! { margin.right }],
+            doc_string_prefix: "Sets the right margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
+        },
+    ]
+}
+
+fn padding_box_style_prefixes() -> Vec<BoxStylePrefix> {
+    vec![
+        BoxStylePrefix {
+            prefix: "p",
+            auto_allowed: false,
+            fields: vec![
+                quote! { padding.top },
+                quote! { padding.bottom },
+                quote! { padding.left },
+                quote! { padding.right },
+            ],
+            doc_string_prefix: "Sets the padding of the element. [Docs](https://tailwindcss.com/docs/padding)",
+        },
+        BoxStylePrefix {
+            prefix: "pt",
+            auto_allowed: false,
+            fields: vec![quote! { padding.top }],
+            doc_string_prefix: "Sets the top padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
+        },
+        BoxStylePrefix {
+            prefix: "pb",
+            auto_allowed: false,
+            fields: vec![quote! { padding.bottom }],
+            doc_string_prefix: "Sets the bottom padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
+        },
+        BoxStylePrefix {
+            prefix: "px",
+            auto_allowed: false,
+            fields: vec![quote! { padding.left }, quote! { padding.right }],
+            doc_string_prefix: "Sets the horizontal padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-horizontal-padding)",
+        },
+        BoxStylePrefix {
+            prefix: "py",
+            auto_allowed: false,
+            fields: vec![quote! { padding.top }, quote! { padding.bottom }],
+            doc_string_prefix: "Sets the vertical padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-vertical-padding)",
+        },
+        BoxStylePrefix {
+            prefix: "pl",
+            auto_allowed: false,
+            fields: vec![quote! { padding.left }],
+            doc_string_prefix: "Sets the left padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
+        },
+        BoxStylePrefix {
+            prefix: "pr",
+            auto_allowed: false,
+            fields: vec![quote! { padding.right }],
+            doc_string_prefix: "Sets the right padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
+        },
+    ]
+}
+
+fn position_box_style_prefixes() -> Vec<BoxStylePrefix> {
+    vec![
+        BoxStylePrefix {
+            prefix: "inset",
+            auto_allowed: true,
+            fields: vec![
+                quote! { inset.top },
+                quote! { inset.right },
+                quote! { inset.bottom },
+                quote! { inset.left },
+            ],
+            doc_string_prefix: "Sets the top, right, bottom, and left values of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
+        },
+        BoxStylePrefix {
+            prefix: "top",
+            auto_allowed: true,
+            fields: vec![quote! { inset.top }],
+            doc_string_prefix: "Sets the top value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
+        },
+        BoxStylePrefix {
+            prefix: "bottom",
+            auto_allowed: true,
+            fields: vec![quote! { inset.bottom }],
+            doc_string_prefix: "Sets the bottom value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
+        },
+        BoxStylePrefix {
+            prefix: "left",
+            auto_allowed: true,
+            fields: vec![quote! { inset.left }],
+            doc_string_prefix: "Sets the left value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
+        },
+        BoxStylePrefix {
+            prefix: "right",
+            auto_allowed: true,
+            fields: vec![quote! { inset.right }],
+            doc_string_prefix: "Sets the right value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
+        },
+    ]
 }
 
 fn box_prefixes() -> Vec<BoxStylePrefix> {
@@ -256,135 +865,6 @@ fn box_prefixes() -> Vec<BoxStylePrefix> {
             doc_string_prefix: "Sets the maximum height of the element. [Docs](https://tailwindcss.com/docs/max-height)",
         },
         BoxStylePrefix {
-            prefix: "m",
-            auto_allowed: true,
-            fields: vec![
-                quote! { margin.top },
-                quote! { margin.bottom },
-                quote! { margin.left },
-                quote! { margin.right },
-            ],
-            doc_string_prefix: "Sets the margin of the element. [Docs](https://tailwindcss.com/docs/margin)",
-        },
-        BoxStylePrefix {
-            prefix: "mt",
-            auto_allowed: true,
-            fields: vec![quote! { margin.top }],
-            doc_string_prefix: "Sets the top margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "mb",
-            auto_allowed: true,
-            fields: vec![quote! { margin.bottom }],
-            doc_string_prefix: "Sets the bottom margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "my",
-            auto_allowed: true,
-            fields: vec![quote! { margin.top }, quote! { margin.bottom }],
-            doc_string_prefix: "Sets the vertical margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-vertical-margin)",
-        },
-        BoxStylePrefix {
-            prefix: "mx",
-            auto_allowed: true,
-            fields: vec![quote! { margin.left }, quote! { margin.right }],
-            doc_string_prefix: "Sets the horizontal margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-horizontal-margin)",
-        },
-        BoxStylePrefix {
-            prefix: "ml",
-            auto_allowed: true,
-            fields: vec![quote! { margin.left }],
-            doc_string_prefix: "Sets the left margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "mr",
-            auto_allowed: true,
-            fields: vec![quote! { margin.right }],
-            doc_string_prefix: "Sets the right margin of the element. [Docs](https://tailwindcss.com/docs/margin#add-margin-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "p",
-            auto_allowed: false,
-            fields: vec![
-                quote! { padding.top },
-                quote! { padding.bottom },
-                quote! { padding.left },
-                quote! { padding.right },
-            ],
-            doc_string_prefix: "Sets the padding of the element. [Docs](https://tailwindcss.com/docs/padding)",
-        },
-        BoxStylePrefix {
-            prefix: "pt",
-            auto_allowed: false,
-            fields: vec![quote! { padding.top }],
-            doc_string_prefix: "Sets the top padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "pb",
-            auto_allowed: false,
-            fields: vec![quote! { padding.bottom }],
-            doc_string_prefix: "Sets the bottom padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "px",
-            auto_allowed: false,
-            fields: vec![quote! { padding.left }, quote! { padding.right }],
-            doc_string_prefix: "Sets the horizontal padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-horizontal-padding)",
-        },
-        BoxStylePrefix {
-            prefix: "py",
-            auto_allowed: false,
-            fields: vec![quote! { padding.top }, quote! { padding.bottom }],
-            doc_string_prefix: "Sets the vertical padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-vertical-padding)",
-        },
-        BoxStylePrefix {
-            prefix: "pl",
-            auto_allowed: false,
-            fields: vec![quote! { padding.left }],
-            doc_string_prefix: "Sets the left padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "pr",
-            auto_allowed: false,
-            fields: vec![quote! { padding.right }],
-            doc_string_prefix: "Sets the right padding of the element. [Docs](https://tailwindcss.com/docs/padding#add-padding-to-a-single-side)",
-        },
-        BoxStylePrefix {
-            prefix: "inset",
-            auto_allowed: true,
-            fields: vec![
-                quote! { inset.top },
-                quote! { inset.right },
-                quote! { inset.bottom },
-                quote! { inset.left },
-            ],
-            doc_string_prefix: "Sets the top, right, bottom, and left values of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
-        },
-        BoxStylePrefix {
-            prefix: "top",
-            auto_allowed: true,
-            fields: vec![quote! { inset.top }],
-            doc_string_prefix: "Sets the top value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
-        },
-        BoxStylePrefix {
-            prefix: "bottom",
-            auto_allowed: true,
-            fields: vec![quote! { inset.bottom }],
-            doc_string_prefix: "Sets the bottom value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
-        },
-        BoxStylePrefix {
-            prefix: "left",
-            auto_allowed: true,
-            fields: vec![quote! { inset.left }],
-            doc_string_prefix: "Sets the left value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
-        },
-        BoxStylePrefix {
-            prefix: "right",
-            auto_allowed: true,
-            fields: vec![quote! { inset.right }],
-            doc_string_prefix: "Sets the right value of a positioned element. [Docs](https://tailwindcss.com/docs/top-right-bottom-left)",
-        },
-        BoxStylePrefix {
             prefix: "gap",
             auto_allowed: false,
             fields: vec![quote! { gap.width }, quote! { gap.height }],
@@ -405,13 +885,7 @@ fn box_prefixes() -> Vec<BoxStylePrefix> {
     ]
 }
 
-struct BoxStyleSuffix {
-    suffix: &'static str,
-    length_tokens: TokenStream2,
-    doc_string_suffix: &'static str,
-}
-
-fn box_suffixes() -> Vec<BoxStyleSuffix> {
+fn box_style_suffixes() -> Vec<BoxStyleSuffix> {
     vec![
         BoxStyleSuffix {
             suffix: "0",
@@ -646,12 +1120,6 @@ fn box_suffixes() -> Vec<BoxStyleSuffix> {
     ]
 }
 
-struct CornerStylePrefix {
-    prefix: &'static str,
-    fields: Vec<TokenStream2>,
-    doc_string_prefix: &'static str,
-}
-
 fn corner_prefixes() -> Vec<CornerStylePrefix> {
     vec![
         CornerStylePrefix {
@@ -719,12 +1187,6 @@ fn corner_prefixes() -> Vec<CornerStylePrefix> {
     ]
 }
 
-struct CornerStyleSuffix {
-    suffix: &'static str,
-    radius_tokens: TokenStream2,
-    doc_string_suffix: &'static str,
-}
-
 fn corner_suffixes() -> Vec<CornerStyleSuffix> {
     vec![
         CornerStyleSuffix {
@@ -768,12 +1230,6 @@ fn corner_suffixes() -> Vec<CornerStyleSuffix> {
             doc_string_suffix: "9999px",
         },
     ]
-}
-
-struct BorderStylePrefix {
-    prefix: &'static str,
-    fields: Vec<TokenStream2>,
-    doc_string_prefix: &'static str,
 }
 
 fn border_prefixes() -> Vec<BorderStylePrefix> {
@@ -825,12 +1281,6 @@ fn border_prefixes() -> Vec<BorderStylePrefix> {
             doc_string_prefix: "Sets the border width of the horizontal sides of the element. [Docs](https://tailwindcss.com/docs/border-width#horizontal-and-vertical-sides)"
         },
     ]
-}
-
-struct BorderStyleSuffix {
-    suffix: &'static str,
-    width_tokens: TokenStream2,
-    doc_string_suffix: &'static str,
 }
 
 fn border_suffixes() -> Vec<BorderStyleSuffix> {
