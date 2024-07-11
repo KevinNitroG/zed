@@ -22,6 +22,7 @@
 - [Collaboration](./collaboration.md)
 - [Tasks](./tasks.md)
 - [Remote Development](./remote-development.md)
+- [Repl](./repl.md)
 
 # Language Support
 
@@ -61,6 +62,7 @@
 - [Uiua](./languages/uiua.md)
 - [Vue](./languages/vue.md)
 - [YAML](./languages/yaml.md)
+- [Yarn](./languages/yarn.md)
 - [Zig](./languages/zig.md)
 
 # Developing Zed
