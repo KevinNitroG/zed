@@ -30,10 +30,10 @@ use gpui::{
     action_as, actions, canvas, impl_action_as, impl_actions, point, relative, size,
     transparent_black, Action, AnyElement, AnyView, AnyWeakView, AppContext, AsyncAppContext,
     AsyncWindowContext, Bounds, CursorStyle, Decorations, DragMoveEvent, Entity as _, EntityId,
-    EventEmitter, FocusHandle, FocusableView, Global, Hsla, KeyContext, Keystroke, ManagedView,
-    Model, ModelContext, MouseButton, PathPromptOptions, Point, PromptLevel, Render, ResizeEdge,
-    Size, Stateful, Subscription, Task, Tiling, View, WeakView, WindowBounds, WindowHandle,
-    WindowOptions,
+    EventEmitter, Flatten, FocusHandle, FocusableView, Global, Hsla, KeyContext, Keystroke,
+    ManagedView, Model, ModelContext, MouseButton, PathPromptOptions, Point, PromptLevel, Render,
+    ResizeEdge, Size, Stateful, Subscription, Task, Tiling, View, WeakView, WindowBounds,
+    WindowHandle, WindowOptions,
 };
 use item::{
     FollowableItem, FollowableItemHandle, Item, ItemHandle, ItemSettings, PreviewTabsSettings,
@@ -305,13 +305,31 @@ pub fn init(app_state: Arc<AppState>, cx: &mut AppContext) {
 
             if let Some(app_state) = app_state.upgrade() {
                 cx.spawn(move |cx| async move {
-                    if let Some(paths) = paths.await.log_err().flatten() {
-                        cx.update(|cx| {
-                            open_paths(&paths, app_state, OpenOptions::default(), cx)
-                                .detach_and_log_err(cx)
-                        })
-                        .ok();
-                    }
+                    match Flatten::flatten(paths.await.map_err(|e| e.into())) {
+                        Ok(Some(paths)) => {
+                            cx.update(|cx| {
+                                open_paths(&paths, app_state, OpenOptions::default(), cx)
+                                    .detach_and_log_err(cx)
+                            })
+                            .ok();
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            cx.update(|cx| {
+                                if let Some(workspace_window) = cx
+                                    .active_window()
+                                    .and_then(|window| window.downcast::<Workspace>())
+                                {
+                                    workspace_window
+                                        .update(cx, |workspace, cx| {
+                                            workspace.show_portal_error(err.to_string(), cx);
+                                        })
+                                        .ok();
+                                }
+                            })
+                            .ok();
+                        }
+                    };
                 })
                 .detach();
             }
@@ -586,6 +604,10 @@ type PromptForNewPath = Box<
     dyn Fn(&mut Workspace, &mut ViewContext<Workspace>) -> oneshot::Receiver<Option<ProjectPath>>,
 >;
 
+type PromptForOpenPath = Box<
+    dyn Fn(&mut Workspace, &mut ViewContext<Workspace>) -> oneshot::Receiver<Option<Vec<PathBuf>>>,
+>;
+
 /// Collects everything project-related for a certain window opened.
 /// In some way, is a counterpart of a window, as the [`WindowHandle`] could be downcast into `Workspace`.
 ///
@@ -628,6 +650,7 @@ pub struct Workspace {
     centered_layout: bool,
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
+    on_prompt_for_open_path: Option<PromptForOpenPath>,
     render_disconnected_overlay:
         Option<Box<dyn Fn(&mut Self, &mut ViewContext<Self>) -> AnyElement>>,
 }
@@ -913,6 +936,7 @@ impl Workspace {
             centered_layout: false,
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
+            on_prompt_for_open_path: None,
             render_disconnected_overlay: None,
         }
     }
@@ -1294,6 +1318,10 @@ impl Workspace {
         self.on_prompt_for_new_path = Some(prompt)
     }
 
+    pub fn set_prompt_for_open_path(&mut self, prompt: PromptForOpenPath) {
+        self.on_prompt_for_open_path = Some(prompt)
+    }
+
     pub fn set_render_disconnected_overlay(
         &mut self,
         render: impl Fn(&mut Self, &mut ViewContext<Self>) -> AnyElement + 'static,
@@ -1301,11 +1329,60 @@ impl Workspace {
         self.render_disconnected_overlay = Some(Box::new(render))
     }
 
+    pub fn prompt_for_open_path(
+        &mut self,
+        path_prompt_options: PathPromptOptions,
+        cx: &mut ViewContext<Self>,
+    ) -> oneshot::Receiver<Option<Vec<PathBuf>>> {
+        if self.project.read(cx).is_remote()
+            || !WorkspaceSettings::get_global(cx).use_system_path_prompts
+        {
+            let prompt = self.on_prompt_for_open_path.take().unwrap();
+            let rx = prompt(self, cx);
+            self.on_prompt_for_open_path = Some(prompt);
+            rx
+        } else {
+            let (tx, rx) = oneshot::channel();
+            let abs_path = cx.prompt_for_paths(path_prompt_options);
+
+            cx.spawn(|this, mut cx| async move {
+                let Ok(result) = abs_path.await else {
+                    return Ok(());
+                };
+
+                match result {
+                    Ok(result) => {
+                        tx.send(result).log_err();
+                    }
+                    Err(err) => {
+                        let rx = this.update(&mut cx, |this, cx| {
+                            this.show_portal_error(err.to_string(), cx);
+                            let prompt = this.on_prompt_for_open_path.take().unwrap();
+                            let rx = prompt(this, cx);
+                            this.on_prompt_for_open_path = Some(prompt);
+                            rx
+                        })?;
+                        if let Ok(path) = rx.await {
+                            tx.send(path).log_err();
+                        }
+                    }
+                };
+                anyhow::Ok(())
+            })
+            .detach();
+
+            rx
+        }
+    }
+
     pub fn prompt_for_new_path(
         &mut self,
         cx: &mut ViewContext<Self>,
     ) -> oneshot::Receiver<Option<ProjectPath>> {
-        if let Some(prompt) = self.on_prompt_for_new_path.take() {
+        if self.project.read(cx).is_remote()
+            || !WorkspaceSettings::get_global(cx).use_system_path_prompts
+        {
+            let prompt = self.on_prompt_for_new_path.take().unwrap();
             let rx = prompt(self, cx);
             self.on_prompt_for_new_path = Some(prompt);
             rx
@@ -1321,7 +1398,24 @@ impl Workspace {
             let (tx, rx) = oneshot::channel();
             let abs_path = cx.prompt_for_new_path(&start_abs_path);
             cx.spawn(|this, mut cx| async move {
-                let abs_path = abs_path.await?;
+                let abs_path = match abs_path.await? {
+                    Ok(path) => path,
+                    Err(err) => {
+                        let rx = this.update(&mut cx, |this, cx| {
+                            this.show_portal_error(err.to_string(), cx);
+
+                            let prompt = this.on_prompt_for_new_path.take().unwrap();
+                            let rx = prompt(this, cx);
+                            this.on_prompt_for_new_path = Some(prompt);
+                            rx
+                        })?;
+                        if let Ok(path) = rx.await {
+                            tx.send(path).log_err();
+                        }
+                        return anyhow::Ok(());
+                    }
+                };
+
                 let project_path = abs_path.and_then(|abs_path| {
                     this.update(&mut cx, |this, cx| {
                         this.project.update(cx, |project, cx| {
@@ -1603,11 +1697,14 @@ impl Workspace {
         self.client()
             .telemetry()
             .report_app_event("open project".to_string());
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: true,
-            multiple: true,
-        });
+        let paths = self.prompt_for_open_path(
+            PathPromptOptions {
+                files: true,
+                directories: true,
+                multiple: true,
+            },
+            cx,
+        );
 
         cx.spawn(|this, mut cx| async move {
             let Some(paths) = paths.await.log_err().flatten() else {
@@ -1767,11 +1864,14 @@ impl Workspace {
             );
             return;
         }
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: true,
-        });
+        let paths = self.prompt_for_open_path(
+            PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: true,
+            },
+            cx,
+        );
         cx.spawn(|this, mut cx| async move {
             if let Some(paths) = paths.await.log_err().flatten() {
                 let results = this
