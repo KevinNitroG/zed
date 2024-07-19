@@ -261,7 +261,7 @@ pub struct ExcerptRange<T> {
 }
 
 #[derive(Clone, Debug, Default)]
-struct ExcerptSummary {
+pub struct ExcerptSummary {
     excerpt_id: ExcerptId,
     /// The location of the last [`Excerpt`] being summarized
     excerpt_locator: Locator,
@@ -3639,6 +3639,12 @@ impl MultiBufferSnapshot {
                         text: item.text,
                         highlight_ranges: item.highlight_ranges,
                         name_ranges: item.name_ranges,
+                        body_range: item.body_range.and_then(|body_range| {
+                            Some(
+                                self.anchor_in_excerpt(*excerpt_id, body_range.start)?
+                                    ..self.anchor_in_excerpt(*excerpt_id, body_range.end)?,
+                            )
+                        }),
                     })
                 })
                 .collect(),
@@ -3668,6 +3674,12 @@ impl MultiBufferSnapshot {
                         text: item.text,
                         highlight_ranges: item.highlight_ranges,
                         name_ranges: item.name_ranges,
+                        body_range: item.body_range.and_then(|body_range| {
+                            Some(
+                                self.anchor_in_excerpt(excerpt_id, body_range.start)?
+                                    ..self.anchor_in_excerpt(excerpt_id, body_range.end)?,
+                            )
+                        }),
                     })
                 })
                 .collect(),
@@ -3730,6 +3742,21 @@ impl MultiBufferSnapshot {
 
     pub fn buffer_for_excerpt(&self, excerpt_id: ExcerptId) -> Option<&BufferSnapshot> {
         Some(&self.excerpt(excerpt_id)?.buffer)
+    }
+
+    pub fn range_for_excerpt<'a, T: sum_tree::Dimension<'a, ExcerptSummary>>(
+        &'a self,
+        excerpt_id: ExcerptId,
+    ) -> Option<Range<T>> {
+        let mut cursor = self.excerpts.cursor::<(Option<&Locator>, T)>();
+        let locator = self.excerpt_locator_for_id(excerpt_id);
+        if cursor.seek(&Some(locator), Bias::Left, &()) {
+            let start = cursor.start().1.clone();
+            let end = cursor.end(&()).1;
+            Some(start..end)
+        } else {
+            None
+        }
     }
 
     fn excerpt(&self, excerpt_id: ExcerptId) -> Option<&Excerpt> {

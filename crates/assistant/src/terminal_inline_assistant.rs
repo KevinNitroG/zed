@@ -73,11 +73,13 @@ impl TerminalInlineAssistant {
         terminal_view: &View<TerminalView>,
         workspace: Option<WeakView<Workspace>>,
         assistant_panel: Option<&View<AssistantPanel>>,
+        initial_prompt: Option<String>,
         cx: &mut WindowContext,
     ) {
         let terminal = terminal_view.read(cx).terminal().clone();
         let assist_id = self.next_assist_id.post_inc();
-        let prompt_buffer = cx.new_model(|cx| Buffer::local("", cx));
+        let prompt_buffer =
+            cx.new_model(|cx| Buffer::local(initial_prompt.unwrap_or_default(), cx));
         let prompt_buffer = cx.new_model(|cx| MultiBuffer::singleton(prompt_buffer, cx));
         let codegen = cx.new_model(|_| Codegen::new(terminal, self.telemetry.clone()));
 
@@ -1026,7 +1028,7 @@ impl Codegen {
 
         let telemetry = self.telemetry.clone();
         let model_telemetry_id = prompt.model.telemetry_id();
-        let response = CompletionProvider::global(cx).complete(prompt, cx);
+        let response = CompletionProvider::global(cx).stream_completion(prompt, cx);
 
         self.generation = cx.spawn(|this, mut cx| async move {
             let response = response.await;
@@ -1037,8 +1039,8 @@ impl Codegen {
                     let mut response_latency = None;
                     let request_start = Instant::now();
                     let task = async {
-                        let mut response = response.inner.await?;
-                        while let Some(chunk) = response.next().await {
+                        let mut chunks = response?;
+                        while let Some(chunk) = chunks.next().await {
                             if response_latency.is_none() {
                                 response_latency = Some(request_start.elapsed());
                             }
