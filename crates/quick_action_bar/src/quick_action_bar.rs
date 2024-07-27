@@ -27,7 +27,6 @@ pub struct QuickActionBar {
     _inlay_hints_enabled_subscription: Option<Subscription>,
     active_item: Option<Box<dyn ItemHandle>>,
     buffer_search_bar: View<BufferSearchBar>,
-    platform_style: PlatformStyle,
     repl_menu: Option<View<ContextMenu>>,
     show: bool,
     toggle_selections_menu: Option<View<ContextMenu>>,
@@ -45,7 +44,6 @@ impl QuickActionBar {
             _inlay_hints_enabled_subscription: None,
             active_item: None,
             buffer_search_bar,
-            platform_style: PlatformStyle::platform(),
             repl_menu: None,
             show: true,
             toggle_selections_menu: None,
@@ -303,25 +301,17 @@ impl Render for QuickActionBar {
 
         h_flex()
             .id("quick action bar")
-            .gap(Spacing::XXLarge.rems(cx))
-            .child(
-                h_flex()
-                    .gap(Spacing::Medium.rems(cx))
-                    .children(self.render_repl_menu(cx))
-                    .children(self.render_toggle_markdown_preview(self.workspace.clone(), cx))
-                    .children(search_button)
-                    .when(
-                        AssistantSettings::get_global(cx).enabled
-                            && AssistantSettings::get_global(cx).button,
-                        |bar| bar.child(assistant_button),
-                    ),
+            .gap(Spacing::Medium.rems(cx))
+            .children(self.render_repl_menu(cx))
+            .children(self.render_toggle_markdown_preview(self.workspace.clone(), cx))
+            .children(search_button)
+            .when(
+                AssistantSettings::get_global(cx).enabled
+                    && AssistantSettings::get_global(cx).button,
+                |bar| bar.child(assistant_button),
             )
-            .child(
-                h_flex()
-                    .gap(Spacing::Medium.rems(cx))
-                    .children(editor_selections_dropdown)
-                    .child(editor_settings_dropdown),
-            )
+            .children(editor_selections_dropdown)
+            .child(editor_settings_dropdown)
             .when_some(self.repl_menu.as_ref(), |el, repl_menu| {
                 el.child(Self::render_menu_overlay(repl_menu))
             })

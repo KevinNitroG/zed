@@ -1486,12 +1486,6 @@ checksum = "349a06037c7bf932dd7e7d1f653678b2038b9ad46a74102f1fc7bd7872678cce"
 
 [[package]]
 name = "base64"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
-name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
@@ -1800,6 +1794,12 @@ name = "bumpalo"
 version = "3.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f30e7476521f6f8af1a1c4c0b8cc94f0bee37d91763d0ca2665f299b6cd8aec"
+
+[[package]]
+name = "by_address"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64fa3c856b712db6612c019f14756e64e4bcea13337a6b33b696333a9eaa2d06"
 
 [[package]]
 name = "bytecheck"
@@ -2454,7 +2454,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "axum-extra",
- "base64 0.13.1",
+ "base64 0.22.0",
  "call",
  "channel",
  "chrono",
@@ -2465,7 +2465,7 @@ dependencies = [
  "collections",
  "completion",
  "ctor",
- "dashmap",
+ "dashmap 6.0.1",
  "dev_server_projects",
  "editor",
  "env_logger",
@@ -3255,6 +3255,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
 dependencies = [
  "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "dashmap"
+version = "6.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "804c8821570c3f8b70230c2ba75ffa5c0f9a4189b9a432b6656c536712acae28"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
  "hashbrown 0.14.5",
  "lock_api",
  "once_cell",
@@ -4852,6 +4866,7 @@ dependencies = [
  "cocoa",
  "collections",
  "core-foundation",
+ "core-foundation-sys 0.8.6",
  "core-graphics",
  "core-text",
  "cosmic-text",
@@ -5843,18 +5858,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "jwt"
-version = "0.16.0"
+name = "jsonwebtoken"
+version = "9.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6204285f77fe7d9784db3fdc449ecce1a0114927a51d5a41c4c7a292011c015f"
+checksum = "b9ae10193d25051e74945f1ea2d0b42e03cc3b890f7e4cc5faa44997d808193f"
 dependencies = [
- "base64 0.13.1",
- "crypto-common",
- "digest",
- "hmac",
+ "base64 0.21.7",
+ "js-sys",
+ "pem",
+ "ring",
  "serde",
  "serde_json",
- "sha2",
+ "simple_asn1",
 ]
 
 [[package]]
@@ -6275,15 +6290,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hmac",
- "jwt",
+ "jsonwebtoken",
  "log",
  "prost",
  "prost-build",
  "prost-types",
  "reqwest",
  "serde",
- "sha2",
 ]
 
 [[package]]
@@ -7411,9 +7424,9 @@ dependencies = [
 
 [[package]]
 name = "palette"
-version = "0.7.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebfc23a4b76642983d57e4ad00bb4504eb30a8ce3c70f4aee1f725610e36d97a"
+checksum = "4cbf71184cc5ecc2e4e1baccdb21026c20e5fc3dcf63028a086131b3ab00b6e6"
 dependencies = [
  "approx",
  "fast-srgb8",
@@ -7422,10 +7435,11 @@ dependencies = [
 
 [[package]]
 name = "palette_derive"
-version = "0.7.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8890702dbec0bad9116041ae586f84805b13eecd1d8b1df27c29998a9969d6d"
+checksum = "f5030daf005bface118c096f510ffb781fc28f9ab6a32ab224d8631be6851d30"
 dependencies = [
+ "by_address",
  "proc-macro2",
  "quote",
  "syn 2.0.59",
@@ -7539,6 +7553,16 @@ name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
+
+[[package]]
+name = "pem"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e459365e590736a54c3fa561947c84837534b8e9af6fc5bf781307e82658fae"
+dependencies = [
+ "base64 0.22.0",
+ "serde",
+]
 
 [[package]]
 name = "pem-rfc7468"
@@ -8481,18 +8505,24 @@ name = "recent_projects"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "auto_update",
  "client",
  "dev_server_projects",
  "editor",
+ "futures 0.3.28",
  "fuzzy",
  "gpui",
  "language",
+ "log",
  "markdown",
  "menu",
  "ordered-float 2.10.0",
  "picker",
  "project",
+ "release_channel",
+ "remote",
  "rpc",
+ "schemars",
  "serde",
  "serde_json",
  "settings",
@@ -8669,6 +8699,7 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "shellexpand 2.1.2",
  "smol",
  "toml 0.8.16",
  "util",
@@ -8700,7 +8731,7 @@ dependencies = [
  "alacritty_terminal 0.23.0",
  "anyhow",
  "async-dispatcher",
- "base64 0.13.1",
+ "base64 0.22.0",
  "client",
  "collections",
  "command_palette_hooks",
@@ -8924,7 +8955,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-tungstenite",
- "base64 0.13.1",
+ "base64 0.22.0",
  "chrono",
  "collections",
  "env_logger",
@@ -9614,6 +9645,7 @@ dependencies = [
  "gpui",
  "indoc",
  "lazy_static",
+ "log",
  "paths",
  "pretty_assertions",
  "release_channel",
@@ -9776,6 +9808,18 @@ name = "similar"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad1d488a557b235fc46dae55512ffbfc429d2482b08b4d9435ab07384ca8aec"
+
+[[package]]
+name = "simple_asn1"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adc4e5204eb1910f40f9cfa375f6f05b68c3abac4b6fd879c8ff5e7ae8a0a085"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror",
+ "time",
+]
 
 [[package]]
 name = "simplecss"
@@ -12097,9 +12141,9 @@ dependencies = [
 
 [[package]]
 name = "waker-fn"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d5b2c62b4012a3e1eca5a7e077d13b3bf498c4073e33ccd58626607748ceeca"
+checksum = "317211a0dc0ceedd78fb2ca9a44aed3d7b9b26f81870d485c07122b4350673b7"
 
 [[package]]
 name = "walkdir"
@@ -13997,7 +14041,7 @@ dependencies = [
  "asynchronous-codec",
  "bytes 1.5.0",
  "crossbeam-queue",
- "dashmap",
+ "dashmap 5.5.3",
  "futures-channel",
  "futures-io",
  "futures-task",
