@@ -472,27 +472,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "assistant_tooling"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collections",
- "futures 0.3.28",
- "gpui",
- "log",
- "project",
- "repair_json",
- "schemars",
- "serde",
- "serde_json",
- "settings",
- "sum_tree",
- "ui",
- "unindent",
- "util",
-]
-
-[[package]]
 name = "async-attributes"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4811,8 +4790,10 @@ dependencies = [
  "anyhow",
  "futures 0.3.28",
  "http_client",
+ "schemars",
  "serde",
  "serde_json",
+ "strum",
 ]
 
 [[package]]
@@ -5988,6 +5969,7 @@ dependencies = [
  "env_logger",
  "feature_flags",
  "futures 0.3.28",
+ "google_ai",
  "gpui",
  "http_client",
  "language",
@@ -8716,15 +8698,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "repair_json"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ee191e184125fe72cb59b74160e25584e3908f2aaa84cbda1e161347102aa15"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
 name = "repl"
 version = "0.1.0"
 dependencies = [
@@ -8928,6 +8901,8 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "criterion",
+ "ctor",
+ "env_logger",
  "gpui",
  "log",
  "rand 0.8.5",
@@ -9305,9 +9280,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm"
-version = "0.12.3"
+version = "0.12.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da5b2d70c255bc5cbe1d49f69c3c8eadae0fbbaeb18ee978edbf2f75775cb94d"
+checksum = "c8814e37dc25de54398ee62228323657520b7f29713b8e238649385dbe473ee0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -9333,9 +9308,9 @@ dependencies = [
 
 [[package]]
 name = "sea-orm-macros"
-version = "0.12.3"
+version = "0.12.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c8d455fad40194fb9774fdc4810c0f2700ff0dc0e93bd5ce9d641cc3f5dd75"
+checksum = "5e115c6b078e013aa963cc2d38c196c2c40b05f03d0ac872fe06b6e0d5265603"
 dependencies = [
  "heck 0.4.1",
  "proc-macro2",
@@ -9347,9 +9322,9 @@ dependencies = [
 
 [[package]]
 name = "sea-query"
-version = "0.30.2"
+version = "0.30.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb3e6bba153bb198646c8762c48414942a38db27d142e44735a133cabddcc820"
+checksum = "4166a1e072292d46dc91f31617c2a1cdaf55a8be4b5c9f4bf2ba248e3ac4999b"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -10814,7 +10789,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_derive",
- "serde_json",
  "settings",
  "smol",
  "sysinfo",
@@ -11950,9 +11924,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.8.0"
+version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a183cf7feeba97b4dd1c0d46788634f6221d87fa961b305bed08c851829efcc0"
+checksum = "81dfa00651efa65069b0b6b651f4aaa31ba9e3c3ce0137aaad053604ee7e0314"
 dependencies = [
  "getrandom 0.2.10",
  "serde",
