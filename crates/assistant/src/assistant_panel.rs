@@ -1,3 +1,4 @@
+use crate::ContextStoreEvent;
 use crate::{
     assistant_settings::{AssistantDockPosition, AssistantSettings},
     humanize_token_count,
@@ -94,6 +95,31 @@ pub fn init(cx: &mut AppContext) {
         },
     )
     .detach();
+
+    cx.observe_new_views(
+        |terminal_panel: &mut TerminalPanel, cx: &mut ViewContext<TerminalPanel>| {
+            let settings = AssistantSettings::get_global(cx);
+            if !settings.enabled {
+                return;
+            }
+
+            terminal_panel.register_tab_bar_button(cx.new_view(|_| InlineAssistTabBarButton), cx);
+        },
+    )
+    .detach();
+}
+
+struct InlineAssistTabBarButton;
+
+impl Render for InlineAssistTabBarButton {
+    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
+        IconButton::new("terminal_inline_assistant", IconName::MagicWand)
+            .icon_size(IconSize::Small)
+            .on_click(cx.listener(|_, _, cx| {
+                cx.dispatch_action(InlineAssist::default().boxed_clone());
+            }))
+            .tooltip(move |cx| Tooltip::for_action("Inline Assist", &InlineAssist::default(), cx))
+    }
 }
 
 pub enum AssistantPanelEvent {
@@ -364,6 +390,7 @@ impl AssistantPanel {
             cx.subscribe(&pane, Self::handle_pane_event),
             cx.subscribe(&context_editor_toolbar, Self::handle_toolbar_event),
             cx.subscribe(&model_summary_editor, Self::handle_summary_editor_event),
+            cx.subscribe(&context_store, Self::handle_context_store_event),
             cx.observe(
                 &LanguageModelCompletionProvider::global(cx),
                 |this, _, cx| {
@@ -480,6 +507,46 @@ impl AssistantPanel {
                 })
             })
         }
+    }
+
+    fn handle_context_store_event(
+        &mut self,
+        _context_store: Model<ContextStore>,
+        event: &ContextStoreEvent,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let ContextStoreEvent::ContextCreated(context_id) = event;
+        let Some(context) = self
+            .context_store
+            .read(cx)
+            .loaded_context_for_id(&context_id, cx)
+        else {
+            log::error!("no context found with ID: {}", context_id.to_proto());
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let lsp_adapter_delegate = workspace.update(cx, |workspace, cx| {
+            make_lsp_adapter_delegate(workspace.project(), cx).log_err()
+        });
+
+        let assistant_panel = cx.view().downgrade();
+        let editor = cx.new_view(|cx| {
+            let mut editor = ContextEditor::for_context(
+                context,
+                self.fs.clone(),
+                workspace.clone(),
+                self.project.clone(),
+                lsp_adapter_delegate,
+                assistant_panel,
+                cx,
+            );
+            editor.insert_default_prompt(cx);
+            editor
+        });
+
+        self.show_context(editor.clone(), cx);
     }
 
     fn completion_provider_changed(&mut self, cx: &mut ViewContext<Self>) {
@@ -619,11 +686,6 @@ impl AssistantPanel {
                 .focus_handle(cx)
                 .contains_focused(cx)
             {
-                use feature_flags::FeatureFlagAppExt;
-                if !cx.has_flag::<feature_flags::TerminalInlineAssist>() {
-                    return None;
-                }
-
                 if let Some(terminal_view) = terminal_panel
                     .read(cx)
                     .pane()
@@ -661,29 +723,75 @@ impl AssistantPanel {
     }
 
     fn new_context(&mut self, cx: &mut ViewContext<Self>) -> Option<View<ContextEditor>> {
-        let context = self.context_store.update(cx, |store, cx| store.create(cx));
-        let workspace = self.workspace.upgrade()?;
-        let lsp_adapter_delegate = workspace.update(cx, |workspace, cx| {
-            make_lsp_adapter_delegate(workspace.project(), cx).log_err()
-        });
+        if self.project.read(cx).is_remote() {
+            let task = self
+                .context_store
+                .update(cx, |store, cx| store.create_remote_context(cx));
 
-        let assistant_panel = cx.view().downgrade();
-        let editor = cx.new_view(|cx| {
-            let mut editor = ContextEditor::for_context(
-                context,
-                self.fs.clone(),
-                workspace.clone(),
-                self.project.clone(),
-                lsp_adapter_delegate,
-                assistant_panel,
-                cx,
-            );
-            editor.insert_default_prompt(cx);
-            editor
-        });
+            cx.spawn(|this, mut cx| async move {
+                let context = task.await?;
 
-        self.show_context(editor.clone(), cx);
-        Some(editor)
+                this.update(&mut cx, |this, cx| {
+                    let Some(workspace) = this.workspace.upgrade() else {
+                        return Ok(());
+                    };
+                    let lsp_adapter_delegate = workspace.update(cx, |workspace, cx| {
+                        make_lsp_adapter_delegate(workspace.project(), cx).log_err()
+                    });
+
+                    let fs = this.fs.clone();
+                    let project = this.project.clone();
+                    let weak_assistant_panel = cx.view().downgrade();
+
+                    let editor = cx.new_view(|cx| {
+                        let mut editor = ContextEditor::for_context(
+                            context,
+                            fs,
+                            workspace.clone(),
+                            project,
+                            lsp_adapter_delegate,
+                            weak_assistant_panel,
+                            cx,
+                        );
+                        editor.insert_default_prompt(cx);
+                        editor
+                    });
+
+                    this.show_context(editor, cx);
+
+                    anyhow::Ok(())
+                })??;
+
+                anyhow::Ok(())
+            })
+            .detach_and_log_err(cx);
+
+            None
+        } else {
+            let context = self.context_store.update(cx, |store, cx| store.create(cx));
+            let workspace = self.workspace.upgrade()?;
+            let lsp_adapter_delegate = workspace.update(cx, |workspace, cx| {
+                make_lsp_adapter_delegate(workspace.project(), cx).log_err()
+            });
+
+            let assistant_panel = cx.view().downgrade();
+            let editor = cx.new_view(|cx| {
+                let mut editor = ContextEditor::for_context(
+                    context,
+                    self.fs.clone(),
+                    workspace.clone(),
+                    self.project.clone(),
+                    lsp_adapter_delegate,
+                    assistant_panel,
+                    cx,
+                );
+                editor.insert_default_prompt(cx);
+                editor
+            });
+
+            self.show_context(editor.clone(), cx);
+            Some(editor)
+        }
     }
 
     fn show_context(&mut self, context_editor: View<ContextEditor>, cx: &mut ViewContext<Self>) {
@@ -1207,12 +1315,16 @@ impl ContextEditor {
 
     fn apply_edit_step(&mut self, cx: &mut ViewContext<Self>) -> bool {
         if let Some(step) = self.active_edit_step.as_ref() {
-            InlineAssistant::update_global(cx, |assistant, cx| {
-                for assist_id in &step.assist_ids {
-                    assistant.start_assist(*assist_id, cx);
-                }
-                !step.assist_ids.is_empty()
-            })
+            let assist_ids = step.assist_ids.clone();
+            cx.window_context().defer(|cx| {
+                InlineAssistant::update_global(cx, |assistant, cx| {
+                    for assist_id in assist_ids {
+                        assistant.start_assist(assist_id, cx);
+                    }
+                })
+            });
+
+            !step.assist_ids.is_empty()
         } else {
             false
         }
@@ -1261,11 +1373,7 @@ impl ContextEditor {
                     .collect::<String>()
             ));
             match &step.operations {
-                Some(EditStepOperations::Parsed {
-                    operations,
-                    raw_output,
-                }) => {
-                    output.push_str(&format!("Raw Output:\n{raw_output}\n"));
+                Some(EditStepOperations::Ready(operations)) => {
                     output.push_str("Parsed Operations:\n");
                     for op in operations {
                         output.push_str(&format!("  {:?}\n", op));
@@ -1769,13 +1877,12 @@ impl ContextEditor {
                                     .anchor_in_excerpt(excerpt_id, suggestion.range.end)
                                     .unwrap()
                         };
-                        let initial_text = suggestion.prepend_newline.then(|| "\n".into());
                         InlineAssistant::update_global(cx, |assistant, cx| {
                             assist_ids.push(assistant.suggest_assist(
                                 &editor,
                                 range,
                                 description,
-                                initial_text,
+                                suggestion.initial_insertion,
                                 Some(workspace.clone()),
                                 assistant_panel.upgrade().as_ref(),
                                 cx,
@@ -1837,9 +1944,11 @@ impl ContextEditor {
                                             .anchor_in_excerpt(excerpt_id, suggestion.range.end)
                                             .unwrap()
                                 };
-                                let initial_text =
-                                    suggestion.prepend_newline.then(|| "\n".to_string());
-                                inline_assist_suggestions.push((range, description, initial_text));
+                                inline_assist_suggestions.push((
+                                    range,
+                                    description,
+                                    suggestion.initial_insertion,
+                                ));
                             }
                         }
                     }
@@ -1850,12 +1959,12 @@ impl ContextEditor {
                     .new_view(|cx| Editor::for_multibuffer(multibuffer, Some(project), true, cx))?;
                 cx.update(|cx| {
                     InlineAssistant::update_global(cx, |assistant, cx| {
-                        for (range, description, initial_text) in inline_assist_suggestions {
+                        for (range, description, initial_insertion) in inline_assist_suggestions {
                             assist_ids.push(assistant.suggest_assist(
                                 &editor,
                                 range,
                                 description,
-                                initial_text,
+                                initial_insertion,
                                 Some(workspace.clone()),
                                 assistant_panel.upgrade().as_ref(),
                                 cx,
@@ -2163,7 +2272,7 @@ impl ContextEditor {
         let button_text = match self.edit_step_for_cursor(cx) {
             Some(edit_step) => match &edit_step.operations {
                 Some(EditStepOperations::Pending(_)) => "Computing Changes...",
-                Some(EditStepOperations::Parsed { .. }) => "Apply Changes",
+                Some(EditStepOperations::Ready(_)) => "Apply Changes",
                 None => "Send",
             },
             None => "Send",
