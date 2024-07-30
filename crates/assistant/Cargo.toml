@@ -32,7 +32,6 @@ client.workspace = true
 clock.workspace = true
 collections.workspace = true
 command_palette_hooks.workspace = true
-completion.workspace = true
 editor.workspace = true
 fs.workspace = true
 futures.workspace = true
@@ -64,6 +63,7 @@ serde_json.workspace = true
 settings.workspace = true
 similar.workspace = true
 smol.workspace = true
+strsim.workspace = true
 telemetry_events.workspace = true
 terminal.workspace = true
 terminal_view.workspace = true
@@ -76,7 +76,6 @@ workspace.workspace = true
 picker.workspace = true
 
 [dev-dependencies]
-completion = { workspace = true, features = ["test-support"] }
 ctor.workspace = true
 editor = { workspace = true, features = ["test-support"] }
 env_logger.workspace = true
@@ -84,5 +83,6 @@ language = { workspace = true, features = ["test-support"] }
 log.workspace = true
 project = { workspace = true, features = ["test-support"] }
 rand.workspace = true
+serde_json_lenient.workspace = true
 text = { workspace = true, features = ["test-support"] }
 unindent.workspace = true

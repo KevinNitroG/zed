@@ -1,6 +1,6 @@
 use crate::{
-    prompt_library::PromptStore, slash_command::SlashCommandLine, InitialInsertion,
-    LanguageModelCompletionProvider, MessageId, MessageStatus,
+    prompt_library::PromptStore, slash_command::SlashCommandLine, InitialInsertion, MessageId,
+    MessageStatus,
 };
 use anyhow::{anyhow, Context as _, Result};
 use assistant_slash_command::{
@@ -18,7 +18,10 @@ use gpui::{AppContext, Context as _, EventEmitter, Model, ModelContext, Subscrip
 use language::{
     AnchorRangeExt, Bias, Buffer, LanguageRegistry, OffsetRangeExt, ParseStatus, Point, ToOffset,
 };
-use language_model::{LanguageModelRequest, LanguageModelRequestMessage, LanguageModelTool, Role};
+use language_model::{
+    LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage, LanguageModelTool,
+    Role,
+};
 use open_ai::Model as OpenAiModel;
 use paths::contexts_dir;
 use project::Project;
@@ -488,6 +491,23 @@ impl Debug for EditStepOperations {
 }
 
 /// A description of an operation to apply to one location in the codebase.
+///
+/// This object represents a single edit operation that can be performed on a specific file
+/// in the codebase. It encapsulates both the location (file path) and the nature of the
+/// edit to be made.
+///
+/// # Fields
+///
+/// * `path`: A string representing the file path where the edit operation should be applied.
+///           This path is relative to the root of the project or repository.
+///
+/// * `kind`: An enum representing the specific type of edit operation to be performed.
+///
+/// # Usage
+///
+/// `EditOperation` is used within a code editor to represent and apply
+/// programmatic changes to source code. It provides a structured way to describe
+/// edits for features like refactoring tools or AI-assisted coding suggestions.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 pub struct EditOperation {
     /// The path to the file containing the relevant operation
@@ -527,7 +547,10 @@ impl EditOperation {
                 let candidate = outline
                     .path_candidates
                     .iter()
-                    .find(|item| item.string == symbol)
+                    .max_by(|a, b| {
+                        strsim::jaro_winkler(&a.string, symbol)
+                            .total_cmp(&strsim::jaro_winkler(&b.string, symbol))
+                    })
                     .with_context(|| {
                         format!(
                             "symbol {:?} not found in path {:?}.\ncandidates: {:?}.\nparse status: {:?}. text:\n{}",
@@ -607,51 +630,62 @@ impl EditOperation {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(tag = "kind")]
 pub enum EditOperationKind {
-    /// Rewrite the specified symbol in its entirely based on the given description.
+    /// Rewrites the specified symbol entirely based on the given description.
+    /// This operation completely replaces the existing symbol with new content.
     Update {
-        /// A full path to the symbol to be rewritten from the provided list.
+        /// A fully-qualified reference to the symbol, e.g. `mod foo impl Bar pub fn baz` instead of just `fn baz`.
+        /// The path should uniquely identify the symbol within the containing file.
         symbol: String,
-        /// A brief one-line description of the change that should be applied.
+        /// A brief description of the transformation to apply to the symbol.
         description: String,
     },
-    /// Create a new file with the given path based on the given description.
+    /// Creates a new file with the given path based on the provided description.
+    /// This operation adds a new file to the codebase.
     Create {
-        /// A brief one-line description of the change that should be applied.
+        /// A brief description of the file to be created.
         description: String,
     },
-    /// Insert a new symbol based on the given description before the specified symbol.
+    /// Inserts a new symbol based on the given description before the specified symbol.
+    /// This operation adds new content immediately preceding an existing symbol.
     InsertSiblingBefore {
-        /// A full path to the symbol to be rewritten from the provided list.
+        /// A fully-qualified reference to the symbol, e.g. `mod foo impl Bar pub fn baz` instead of just `fn baz`.
+        /// The new content will be inserted immediately before this symbol.
         symbol: String,
-        /// A brief one-line description of the change that should be applied.
+        /// A brief description of the new symbol to be inserted.
         description: String,
     },
-    /// Insert a new symbol based on the given description after the specified symbol.
+    /// Inserts a new symbol based on the given description after the specified symbol.
+    /// This operation adds new content immediately following an existing symbol.
     InsertSiblingAfter {
-        /// A full path to the symbol to be rewritten from the provided list.
+        /// A fully-qualified reference to the symbol, e.g. `mod foo impl Bar pub fn baz` instead of just `fn baz`.
+        /// The new content will be inserted immediately after this symbol.
         symbol: String,
-        /// A brief one-line description of the change that should be applied.
+        /// A brief description of the new symbol to be inserted.
         description: String,
     },
-    /// Insert a new symbol as a child of the specified symbol at the start.
+    /// Inserts a new symbol as a child of the specified symbol at the start.
+    /// This operation adds new content as the first child of an existing symbol (or file if no symbol is provided).
     PrependChild {
-        /// An optional full path to the symbol to be rewritten from the provided list.
-        /// If not provided, the edit should be applied at the top of the file.
+        /// An optional fully-qualified reference to the symbol after the code you want to insert, e.g. `mod foo impl Bar pub fn baz` instead of just `fn baz`.
+        /// If provided, the new content will be inserted as the first child of this symbol.
+        /// If not provided, the new content will be inserted at the top of the file.
         symbol: Option<String>,
-        /// A brief one-line description of the change that should be applied.
+        /// A brief description of the new symbol to be inserted.
         description: String,
     },
-    /// Insert a new symbol as a child of the specified symbol at the end.
+    /// Inserts a new symbol as a child of the specified symbol at the end.
+    /// This operation adds new content as the last child of an existing symbol (or file if no symbol is provided).
     AppendChild {
-        /// An optional full path to the symbol to be rewritten from the provided list.
-        /// If not provided, the edit should be applied at the top of the file.
+        /// An optional fully-qualified reference to the symbol before the code you want to insert, e.g. `mod foo impl Bar pub fn baz` instead of just `fn baz`.
+        /// If provided, the new content will be inserted as the last child of this symbol.
+        /// If not provided, the new content will be applied at the bottom of the file.
         symbol: Option<String>,
-        /// A brief one-line description of the change that should be applied.
+        /// A brief description of the new symbol to be inserted.
         description: String,
     },
-    /// Delete the specified symbol.
+    /// Deletes the specified symbol from the containing file.
     Delete {
-        /// A full path to the symbol to be rewritten from the provided list.
+        /// An fully-qualified reference to the symbol to be deleted, e.g. `mod foo impl Bar pub fn baz` instead of just `fn baz`.
         symbol: String,
     },
 }
@@ -1149,17 +1183,16 @@ impl Context {
 
     pub(crate) fn count_remaining_tokens(&mut self, cx: &mut ModelContext<Self>) {
         let request = self.to_completion_request(cx);
+        let Some(model) = LanguageModelRegistry::read_global(cx).active_model() else {
+            return;
+        };
         self.pending_token_count = cx.spawn(|this, mut cx| {
             async move {
                 cx.background_executor()
                     .timer(Duration::from_millis(200))
                     .await;
 
-                let token_count = cx
-                    .update(|cx| {
-                        LanguageModelCompletionProvider::read_global(cx).count_tokens(request, cx)
-                    })?
-                    .await?;
+                let token_count = cx.update(|cx| model.count_tokens(request, cx))?.await?;
                 this.update(&mut cx, |this, cx| {
                     this.token_count = Some(token_count);
                     cx.notify()
@@ -1337,6 +1370,10 @@ impl Context {
             }
         }
 
+        let Some(model) = LanguageModelRegistry::read_global(cx).active_model() else {
+            return Task::ready(Err(anyhow!("no active model")).log_err());
+        };
+
         let mut request = self.to_completion_request(cx);
         let edit_step_range = edit_step.source_range.clone();
         let step_text = self
@@ -1357,12 +1394,7 @@ impl Context {
                     content: prompt,
                 });
 
-                let tool_use = cx
-                    .update(|cx| {
-                        LanguageModelCompletionProvider::read_global(cx)
-                            .use_tool::<EditTool>(request, cx)
-                    })?
-                    .await?;
+                let tool_use = model.use_tool::<EditTool>(request, &cx).await?;
 
                 this.update(&mut cx, |this, cx| {
                     let step_index = this
@@ -1537,6 +1569,8 @@ impl Context {
     }
 
     pub fn assist(&mut self, cx: &mut ModelContext<Self>) -> Option<MessageAnchor> {
+        let provider = LanguageModelRegistry::read_global(cx).active_provider()?;
+        let model = LanguageModelRegistry::read_global(cx).active_model()?;
         let last_message_id = self.message_anchors.iter().rev().find_map(|message| {
             message
                 .start
@@ -1544,14 +1578,12 @@ impl Context {
                 .then_some(message.id)
         })?;
 
-        if !LanguageModelCompletionProvider::read_global(cx).is_authenticated(cx) {
+        if !provider.is_authenticated(cx) {
             log::info!("completion provider has no credentials");
             return None;
         }
 
         let request = self.to_completion_request(cx);
-        let stream =
-            LanguageModelCompletionProvider::read_global(cx).stream_completion(request, cx);
         let assistant_message = self
             .insert_message_after(last_message_id, Role::Assistant, MessageStatus::Pending, cx)
             .unwrap();
@@ -1563,6 +1595,7 @@ impl Context {
 
         let task = cx.spawn({
             |this, mut cx| async move {
+                let stream = model.stream_completion(request, &cx);
                 let assistant_message_id = assistant_message.id;
                 let mut response_latency = None;
                 let stream_completion = async {
@@ -1631,14 +1664,10 @@ impl Context {
                     });
 
                     if let Some(telemetry) = this.telemetry.as_ref() {
-                        let model_telemetry_id = LanguageModelCompletionProvider::read_global(cx)
-                            .active_model()
-                            .map(|m| m.telemetry_id())
-                            .unwrap_or_default();
                         telemetry.report_assistant_event(
                             Some(this.id.0.clone()),
                             AssistantKind::Panel,
-                            model_telemetry_id,
+                            model.telemetry_id(),
                             response_latency,
                             error_message,
                         );
@@ -1904,8 +1933,15 @@ impl Context {
     }
 
     pub(super) fn summarize(&mut self, replace_old: bool, cx: &mut ModelContext<Self>) {
+        let Some(provider) = LanguageModelRegistry::read_global(cx).active_provider() else {
+            return;
+        };
+        let Some(model) = LanguageModelRegistry::read_global(cx).active_model() else {
+            return;
+        };
+
         if replace_old || (self.message_anchors.len() >= 2 && self.summary.is_none()) {
-            if !LanguageModelCompletionProvider::read_global(cx).is_authenticated(cx) {
+            if !provider.is_authenticated(cx) {
                 return;
             }
 
@@ -1922,10 +1958,9 @@ impl Context {
                 temperature: 1.0,
             };
 
-            let stream =
-                LanguageModelCompletionProvider::read_global(cx).stream_completion(request, cx);
             self.pending_summary = cx.spawn(|this, mut cx| {
                 async move {
+                    let stream = model.stream_completion(request, &cx);
                     let mut messages = stream.await?;
 
                     let mut replaced = !replace_old;
@@ -2459,7 +2494,6 @@ mod tests {
     fn test_inserting_and_removing_messages(cx: &mut AppContext) {
         let settings_store = SettingsStore::test(cx);
         language_model::LanguageModelRegistry::test(cx);
-        completion::LanguageModelCompletionProvider::test(cx);
         cx.set_global(settings_store);
         assistant_panel::init(cx);
         let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
@@ -2592,7 +2626,6 @@ mod tests {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
         language_model::LanguageModelRegistry::test(cx);
-        completion::LanguageModelCompletionProvider::test(cx);
         assistant_panel::init(cx);
         let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
 
@@ -2686,7 +2719,6 @@ mod tests {
     fn test_messages_for_offsets(cx: &mut AppContext) {
         let settings_store = SettingsStore::test(cx);
         language_model::LanguageModelRegistry::test(cx);
-        completion::LanguageModelCompletionProvider::test(cx);
         cx.set_global(settings_store);
         assistant_panel::init(cx);
         let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
@@ -2772,7 +2804,6 @@ mod tests {
         let settings_store = cx.update(SettingsStore::test);
         cx.set_global(settings_store);
         cx.update(language_model::LanguageModelRegistry::test);
-        cx.update(completion::LanguageModelCompletionProvider::test);
         cx.update(Project::init_settings);
         cx.update(assistant_panel::init);
         let fs = FakeFs::new(cx.background_executor.clone());
@@ -2899,7 +2930,6 @@ mod tests {
         cx.set_global(settings_store);
 
         let fake_provider = cx.update(language_model::LanguageModelRegistry::test);
-        cx.update(completion::LanguageModelCompletionProvider::test);
 
         let fake_model = fake_provider.test_model();
         cx.update(assistant_panel::init);
@@ -3001,7 +3031,6 @@ mod tests {
         let settings_store = cx.update(SettingsStore::test);
         cx.set_global(settings_store);
         cx.update(language_model::LanguageModelRegistry::test);
-        cx.update(completion::LanguageModelCompletionProvider::test);
         cx.update(assistant_panel::init);
         let registry = Arc::new(LanguageRegistry::test(cx.executor()));
         let context = cx.new_model(|cx| Context::local(registry.clone(), None, cx));
@@ -3078,7 +3107,6 @@ mod tests {
         let settings_store = cx.update(SettingsStore::test);
         cx.set_global(settings_store);
         cx.update(language_model::LanguageModelRegistry::test);
-        cx.update(completion::LanguageModelCompletionProvider::test);
 
         cx.update(assistant_panel::init);
         let slash_commands = cx.update(SlashCommandRegistry::default_global);
