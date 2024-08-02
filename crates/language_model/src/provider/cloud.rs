@@ -2,13 +2,13 @@ use super::open_ai::count_open_ai_tokens;
 use crate::{
     settings::AllLanguageModelSettings, CloudModel, LanguageModel, LanguageModelId,
     LanguageModelName, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelProviderState, LanguageModelRequest, RateLimiter,
+    LanguageModelProviderState, LanguageModelRequest, RateLimiter, ZedModel,
 };
 use anyhow::{anyhow, Context as _, Result};
-use client::Client;
+use client::{Client, UserStore};
 use collections::BTreeMap;
 use futures::{future::BoxFuture, stream::BoxStream, FutureExt, StreamExt};
-use gpui::{AnyView, AppContext, AsyncAppContext, FocusHandle, ModelContext, Subscription, Task};
+use gpui::{AnyView, AppContext, AsyncAppContext, Model, ModelContext, Subscription, Task};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
@@ -16,12 +16,12 @@ use std::{future, sync::Arc};
 use strum::IntoEnumIterator;
 use ui::prelude::*;
 
-use crate::LanguageModelProvider;
+use crate::{LanguageModelAvailability, LanguageModelProvider};
 
 use super::anthropic::count_anthropic_tokens;
 
 pub const PROVIDER_ID: &str = "zed.dev";
-pub const PROVIDER_NAME: &str = "Zed AI";
+pub const PROVIDER_NAME: &str = "Zed";
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ZedDotDevSettings {
@@ -52,13 +52,14 @@ pub struct CloudLanguageModelProvider {
 
 pub struct State {
     client: Arc<Client>,
+    user_store: Model<UserStore>,
     status: client::Status,
     _subscription: Subscription,
 }
 
 impl State {
-    fn is_connected(&self) -> bool {
-        self.status.is_connected()
+    fn is_signed_out(&self) -> bool {
+        self.status.is_signed_out()
     }
 
     fn authenticate(&self, cx: &mut ModelContext<Self>) -> Task<Result<()>> {
@@ -71,12 +72,13 @@ impl State {
 }
 
 impl CloudLanguageModelProvider {
-    pub fn new(client: Arc<Client>, cx: &mut AppContext) -> Self {
+    pub fn new(user_store: Model<UserStore>, client: Arc<Client>, cx: &mut AppContext) -> Self {
         let mut status_rx = client.status();
         let status = *status_rx.borrow();
 
         let state = cx.new_model(|cx| State {
             client: client.clone(),
+            user_store,
             status,
             _subscription: cx.observe_global::<SettingsStore>(|_, cx| {
                 cx.notify();
@@ -124,6 +126,10 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
         LanguageModelProviderName(PROVIDER_NAME.into())
     }
 
+    fn icon(&self) -> IconName {
+        IconName::AiZed
+    }
+
     fn provided_models(&self, cx: &AppContext) -> Vec<Arc<dyn LanguageModel>> {
         let mut models = BTreeMap::default();
 
@@ -141,6 +147,9 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
             if !matches!(model, google_ai::Model::Custom { .. }) {
                 models.insert(model.id().to_string(), CloudModel::Google(model));
             }
+        }
+        for model in ZedModel::iter() {
+            models.insert(model.id().to_string(), CloudModel::Zed(model));
         }
 
         // Override with available models from settings
@@ -180,20 +189,18 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
     }
 
     fn is_authenticated(&self, cx: &AppContext) -> bool {
-        self.state.read(cx).status.is_connected()
+        !self.state.read(cx).is_signed_out()
     }
 
     fn authenticate(&self, _cx: &mut AppContext) -> Task<Result<()>> {
         Task::ready(Ok(()))
     }
 
-    fn configuration_view(&self, cx: &mut WindowContext) -> (AnyView, Option<FocusHandle>) {
-        let view = cx
-            .new_view(|_cx| ConfigurationView {
-                state: self.state.clone(),
-            })
-            .into();
-        (view, None)
+    fn configuration_view(&self, cx: &mut WindowContext) -> AnyView {
+        cx.new_view(|_cx| ConfigurationView {
+            state: self.state.clone(),
+        })
+        .into()
     }
 
     fn reset_credentials(&self, _cx: &mut AppContext) -> Task<Result<()>> {
@@ -229,6 +236,10 @@ impl LanguageModel for CloudLanguageModel {
         format!("zed.dev/{}", self.model.id())
     }
 
+    fn availability(&self) -> LanguageModelAvailability {
+        self.model.availability()
+    }
+
     fn max_token_count(&self) -> usize {
         self.model.max_token_count()
     }
@@ -258,6 +269,9 @@ impl LanguageModel for CloudLanguageModel {
                     Ok(response.token_count as usize)
                 }
                 .boxed()
+            }
+            CloudModel::Zed(_) => {
+                count_open_ai_tokens(request, open_ai::Model::ThreePointFiveTurbo, cx)
             }
         }
     }
@@ -314,6 +328,24 @@ impl LanguageModel for CloudLanguageModel {
                         })
                         .await?;
                     Ok(google_ai::extract_text_from_events(
+                        stream.map(|item| Ok(serde_json::from_str(&item?.event)?)),
+                    ))
+                });
+                async move { Ok(future.await?.boxed()) }.boxed()
+            }
+            CloudModel::Zed(model) => {
+                let client = self.client.clone();
+                let mut request = request.into_open_ai(model.id().into());
+                request.max_tokens = Some(4000);
+                let future = self.request_limiter.stream(async move {
+                    let request = serde_json::to_string(&request)?;
+                    let stream = client
+                        .request_stream(proto::StreamCompleteWithLanguageModel {
+                            provider: proto::LanguageModelProvider::Zed as i32,
+                            request,
+                        })
+                        .await?;
+                    Ok(open_ai::extract_text_from_events(
                         stream.map(|item| Ok(serde_json::from_str(&item?.event)?)),
                     ))
                 });
@@ -378,6 +410,9 @@ impl LanguageModel for CloudLanguageModel {
             CloudModel::Google(_) => {
                 future::ready(Err(anyhow!("tool use not implemented for Google AI"))).boxed()
             }
+            CloudModel::Zed(_) => {
+                future::ready(Err(anyhow!("tool use not implemented for Zed models"))).boxed()
+            }
         }
     }
 }
@@ -398,11 +433,12 @@ impl ConfigurationView {
 impl Render for ConfigurationView {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         const ZED_AI_URL: &str = "https://zed.dev/ai";
-        const ACCOUNT_SETTINGS_URL: &str = "https://zed.dev/settings";
+        const ACCOUNT_SETTINGS_URL: &str = "https://zed.dev/account";
 
-        let is_connected = self.state.read(cx).is_connected();
+        let is_connected = self.state.read(cx).is_signed_out();
+        let plan = self.state.read(cx).user_store.read(cx).current_plan();
 
-        let is_pro = false;
+        let is_pro = plan == Some(proto::Plan::ZedPro);
 
         if is_connected {
             v_flex()
@@ -410,7 +446,7 @@ impl Render for ConfigurationView {
                 .max_w_4_5()
                 .child(Label::new(
                     if is_pro {
-                        "You have full access to Zed's hosted models from Anthropic, OpenAI, Google through Zed Pro."
+                        "You have full access to Zed's hosted models from Anthropic, OpenAI, Google with faster speeds and higher limits through Zed Pro."
                     } else {
                         "You have basic access to models from Anthropic, OpenAI, Google and more through the Zed AI Free plan."
                     }))

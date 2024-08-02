@@ -1,13 +1,14 @@
 use anyhow::{anyhow, Result};
 use futures::{future::BoxFuture, stream::BoxStream, FutureExt, StreamExt};
-use gpui::{AnyView, AppContext, AsyncAppContext, FocusHandle, ModelContext, Subscription, Task};
+use gpui::{AnyView, AppContext, AsyncAppContext, ModelContext, Subscription, Task};
 use http_client::HttpClient;
 use ollama::{
     get_models, preload_model, stream_chat_completion, ChatMessage, ChatOptions, ChatRequest,
 };
 use settings::{Settings, SettingsStore};
 use std::{future, sync::Arc, time::Duration};
-use ui::{prelude::*, ButtonLike, ElevationIndex, Indicator};
+use ui::{prelude::*, ButtonLike, Indicator};
+use util::ResultExt;
 
 use crate::{
     settings::AllLanguageModelSettings, LanguageModel, LanguageModelId, LanguageModelName,
@@ -17,6 +18,7 @@ use crate::{
 
 const OLLAMA_DOWNLOAD_URL: &str = "https://ollama.com/download";
 const OLLAMA_LIBRARY_URL: &str = "https://ollama.com/library";
+const OLLAMA_SITE: &str = "https://ollama.com/";
 
 const PROVIDER_ID: &str = "ollama";
 const PROVIDER_NAME: &str = "Ollama";
@@ -69,6 +71,14 @@ impl State {
             })
         })
     }
+
+    fn authenticate(&mut self, cx: &mut ModelContext<Self>) -> Task<Result<()>> {
+        if self.is_authenticated() {
+            Task::ready(Ok(()))
+        } else {
+            self.fetch_models(cx)
+        }
+    }
 }
 
 impl OllamaLanguageModelProvider {
@@ -107,6 +117,10 @@ impl LanguageModelProvider for OllamaLanguageModelProvider {
         LanguageModelProviderName(PROVIDER_NAME.into())
     }
 
+    fn icon(&self) -> IconName {
+        IconName::AiOllama
+    }
+
     fn provided_models(&self, cx: &AppContext) -> Vec<Arc<dyn LanguageModel>> {
         self.state
             .read(cx)
@@ -137,19 +151,12 @@ impl LanguageModelProvider for OllamaLanguageModelProvider {
     }
 
     fn authenticate(&self, cx: &mut AppContext) -> Task<Result<()>> {
-        if self.is_authenticated(cx) {
-            Task::ready(Ok(()))
-        } else {
-            self.state.update(cx, |state, cx| state.fetch_models(cx))
-        }
+        self.state.update(cx, |state, cx| state.authenticate(cx))
     }
 
-    fn configuration_view(&self, cx: &mut WindowContext) -> (AnyView, Option<FocusHandle>) {
+    fn configuration_view(&self, cx: &mut WindowContext) -> AnyView {
         let state = self.state.clone();
-        (
-            cx.new_view(|cx| ConfigurationView::new(state, cx)).into(),
-            None,
-        )
+        cx.new_view(|cx| ConfigurationView::new(state, cx)).into()
     }
 
     fn reset_credentials(&self, cx: &mut AppContext) -> Task<Result<()>> {
@@ -291,11 +298,32 @@ impl LanguageModel for OllamaLanguageModel {
 
 struct ConfigurationView {
     state: gpui::Model<State>,
+    loading_models_task: Option<Task<()>>,
 }
 
 impl ConfigurationView {
-    pub fn new(state: gpui::Model<State>, _cx: &mut ViewContext<Self>) -> Self {
-        Self { state }
+    pub fn new(state: gpui::Model<State>, cx: &mut ViewContext<Self>) -> Self {
+        let loading_models_task = Some(cx.spawn({
+            let state = state.clone();
+            |this, mut cx| async move {
+                if let Some(task) = state
+                    .update(&mut cx, |state, cx| state.authenticate(cx))
+                    .log_err()
+                {
+                    task.await.log_err();
+                }
+                this.update(&mut cx, |this, cx| {
+                    this.loading_models_task = None;
+                    cx.notify();
+                })
+                .log_err();
+            }
+        }));
+
+        Self {
+            state,
+            loading_models_task,
+        }
     }
 
     fn retry_connection(&self, cx: &mut WindowContext) {
@@ -303,81 +331,114 @@ impl ConfigurationView {
             .update(cx, |state, cx| state.fetch_models(cx))
             .detach_and_log_err(cx);
     }
-
-    fn render_download_button(&self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
-        ButtonLike::new("download_ollama_button")
-            .style(ButtonStyle::Filled)
-            .size(ButtonSize::Large)
-            .layer(ElevationIndex::ModalSurface)
-            .child(Label::new("Get Ollama"))
-            .on_click(move |_, cx| cx.open_url(OLLAMA_DOWNLOAD_URL))
-    }
-
-    fn render_retry_button(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
-        ButtonLike::new("retry_ollama_models")
-            .style(ButtonStyle::Filled)
-            .size(ButtonSize::Large)
-            .layer(ElevationIndex::ModalSurface)
-            .child(Label::new("Retry"))
-            .on_click(cx.listener(move |this, _, cx| this.retry_connection(cx)))
-    }
-
-    fn render_next_steps(&self, _cx: &mut ViewContext<Self>) -> impl IntoElement {
-        v_flex()
-            .p_4()
-            .size_full()
-            .gap_2()
-            .child(
-                Label::new("Once Ollama is on your machine, make sure to download a model or two.")
-                    .size(LabelSize::Large),
-            )
-            .child(
-                h_flex().w_full().p_4().justify_center().gap_2().child(
-                    ButtonLike::new("view-models")
-                        .style(ButtonStyle::Filled)
-                        .size(ButtonSize::Large)
-                        .layer(ElevationIndex::ModalSurface)
-                        .child(Label::new("View Available Models"))
-                        .on_click(move |_, cx| cx.open_url(OLLAMA_LIBRARY_URL)),
-                ),
-            )
-    }
 }
 
 impl Render for ConfigurationView {
     fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         let is_authenticated = self.state.read(cx).is_authenticated();
 
-        if is_authenticated {
-            v_flex()
-                .size_full()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(Indicator::dot().color(Color::Success))
-                        .child(Label::new("Ollama configured").size(LabelSize::Small)),
-                )
-                .into_any()
+        let ollama_intro = "Get up and running with Llama 3.1, Mistral, Gemma 2, and other large language models with Ollama.";
+        let ollama_reqs =
+            "Ollama must be running with at least one model installed to use it in the assistant.";
+
+        let mut inline_code_bg = cx.theme().colors().editor_background;
+        inline_code_bg.fade_out(0.5);
+
+        if self.loading_models_task.is_some() {
+            div().child(Label::new("Loading models...")).into_any()
         } else {
             v_flex()
-            .size_full()
-            .gap_2()
-            .child(Label::new("To use Ollama models via the assistant, Ollama must be running on your machine with at least one model downloaded.").size(LabelSize::Large))
-            .child(
-                h_flex()
-                    .w_full()
-                    .p_4()
-                    .justify_center()
-                    .gap_2()
-                    .child(
-                        self.render_download_button(cx)
-                    )
-                    .child(
-                        self.render_retry_button(cx)
-                    )
-            )
-            .child(self.render_next_steps(cx))
-            .into_any()
+                .size_full()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .size_full()
+                        .gap_2()
+                        .p_1()
+                        .child(Label::new(ollama_intro))
+                        .child(Label::new(ollama_reqs))
+                        .child(
+                            h_flex()
+                                .gap_0p5()
+                                .child(Label::new("Once installed, try "))
+                                .child(
+                                    div()
+                                        .bg(inline_code_bg)
+                                        .px_1p5()
+                                        .rounded_md()
+                                        .child(Label::new("ollama run llama3.1")),
+                                ),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .pt_2()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .map(|this| {
+                                    if is_authenticated {
+                                        this.child(
+                                            Button::new("ollama-site", "Ollama")
+                                                .style(ButtonStyle::Subtle)
+                                                .icon(IconName::ExternalLink)
+                                                .icon_size(IconSize::XSmall)
+                                                .icon_color(Color::Muted)
+                                                .on_click(move |_, cx| cx.open_url(OLLAMA_SITE))
+                                                .into_any_element(),
+                                        )
+                                    } else {
+                                        this.child(
+                                            Button::new(
+                                                "download_ollama_button",
+                                                "Download Ollama",
+                                            )
+                                            .style(ButtonStyle::Subtle)
+                                            .icon(IconName::ExternalLink)
+                                            .icon_size(IconSize::XSmall)
+                                            .icon_color(Color::Muted)
+                                            .on_click(move |_, cx| cx.open_url(OLLAMA_DOWNLOAD_URL))
+                                            .into_any_element(),
+                                        )
+                                    }
+                                })
+                                .child(
+                                    Button::new("view-models", "All Models")
+                                        .style(ButtonStyle::Subtle)
+                                        .icon(IconName::ExternalLink)
+                                        .icon_size(IconSize::XSmall)
+                                        .icon_color(Color::Muted)
+                                        .on_click(move |_, cx| cx.open_url(OLLAMA_LIBRARY_URL)),
+                                ),
+                        )
+                        .child(if is_authenticated {
+                            // This is only a button to ensure the spacing is correct
+                            // it should stay disabled
+                            ButtonLike::new("connected")
+                                .disabled(true)
+                                // Since this won't ever be clickable, we can use the arrow cursor
+                                .cursor_style(gpui::CursorStyle::Arrow)
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(Indicator::dot().color(Color::Success))
+                                        .child(Label::new("Connected"))
+                                        .into_any_element(),
+                                )
+                                .into_any_element()
+                        } else {
+                            Button::new("retry_ollama_models", "Connect")
+                                .icon_position(IconPosition::Start)
+                                .icon(IconName::ArrowCircle)
+                                .on_click(cx.listener(move |this, _, cx| this.retry_connection(cx)))
+                                .into_any_element()
+                        }),
+                )
+                .into_any()
         }
     }
 }

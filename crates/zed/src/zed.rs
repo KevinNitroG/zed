@@ -425,7 +425,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut AppContext) {
             .register_action(
                 |_: &mut Workspace, _: &OpenAccountSettings, cx: &mut ViewContext<Workspace>| {
                     let server_url = &client::ClientSettings::get_global(cx).server_url;
-                    cx.open_url(&format!("{server_url}/settings"));
+                    cx.open_url(&format!("{server_url}/account"));
                 },
             )
             .register_action(
@@ -3467,7 +3467,12 @@ mod tests {
                 app_state.client.http_client().clone(),
                 cx,
             );
-            language_model::init(app_state.client.clone(), app_state.fs.clone(), cx);
+            language_model::init(
+                app_state.user_store.clone(),
+                app_state.client.clone(),
+                app_state.fs.clone(),
+                cx,
+            );
             assistant::init(app_state.fs.clone(), app_state.client.clone(), cx);
             repl::init(
                 app_state.fs.clone(),
