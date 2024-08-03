@@ -2,7 +2,7 @@ use crate::components::KernelListItem;
 use crate::KernelStatus;
 use crate::{
     kernels::{Kernel, KernelSpecification, RunningKernel},
-    outputs::{ExecutionStatus, ExecutionView, LineHeight as _},
+    outputs::{ExecutionStatus, ExecutionView},
 };
 use client::telemetry::Telemetry;
 use collections::{HashMap, HashSet};
@@ -82,7 +82,8 @@ impl EditorBlock {
             let invalidation_anchor = buffer.read(cx).read(cx).anchor_before(next_row_start);
             let block = BlockProperties {
                 position: code_range.end,
-                height: (execution_view.num_lines(cx) + 1) as u32,
+                // Take up at least one height for status, allow the editor to determine the real height based on the content from render
+                height: 1,
                 style: BlockStyle::Sticky,
                 render: Self::create_output_area_renderer(execution_view.clone(), on_close.clone()),
                 disposition: BlockDisposition::Below,
@@ -547,6 +548,20 @@ impl Session {
             JupyterMessageContent::KernelInfoReply(reply) => {
                 self.kernel.set_kernel_info(&reply);
                 cx.notify();
+            }
+            JupyterMessageContent::UpdateDisplayData(update) => {
+                let display_id = if let Some(display_id) = update.transient.display_id.clone() {
+                    display_id
+                } else {
+                    return;
+                };
+
+                self.blocks.iter_mut().for_each(|(_, block)| {
+                    block.execution_view.update(cx, |execution_view, cx| {
+                        execution_view.update_display_data(&update.data, &display_id, cx);
+                    });
+                });
+                return;
             }
             _ => {}
         }
