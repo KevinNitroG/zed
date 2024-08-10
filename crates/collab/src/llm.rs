@@ -1,8 +1,12 @@
 mod authorization;
 pub mod db;
+mod telemetry;
 mod token;
 
-use crate::{api::CloudflareIpCountryHeader, executor::Executor, Config, Error, Result};
+use crate::{
+    api::CloudflareIpCountryHeader, build_clickhouse_client, executor::Executor, Config, Error,
+    Result,
+};
 use anyhow::{anyhow, Context as _};
 use authorization::authorize_access_to_language_model;
 use axum::{
@@ -15,10 +19,17 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use db::{ActiveUserCount, LlmDatabase};
-use futures::StreamExt as _;
+use futures::{Stream, StreamExt as _};
 use http_client::IsahcHttpClient;
-use rpc::{LanguageModelProvider, PerformCompletionParams, EXPIRED_LLM_TOKEN_HEADER_NAME};
-use std::sync::Arc;
+use rpc::{
+    proto::Plan, LanguageModelProvider, PerformCompletionParams, EXPIRED_LLM_TOKEN_HEADER_NAME,
+};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+use telemetry::{report_llm_usage, LlmUsageEventRow};
 use tokio::sync::RwLock;
 use util::ResultExt;
 
@@ -29,6 +40,7 @@ pub struct LlmState {
     pub executor: Executor,
     pub db: Arc<LlmDatabase>,
     pub http_client: IsahcHttpClient,
+    pub clickhouse_client: Option<clickhouse::Client>,
     active_user_count: RwLock<Option<(DateTime<Utc>, ActiveUserCount)>>,
 }
 
@@ -61,11 +73,15 @@ impl LlmState {
             Some((Utc::now(), db.get_active_user_count(Utc::now()).await?));
 
         let this = Self {
-            config,
             executor,
             db,
             http_client,
+            clickhouse_client: config
+                .clickhouse_url
+                .as_ref()
+                .and_then(|_| build_clickhouse_client(&config).log_err()),
             active_user_count: RwLock::new(initial_active_user_count),
+            config,
         };
 
         Ok(Arc::new(this))
@@ -151,11 +167,9 @@ async fn perform_completion(
         &model,
     )?;
 
-    let user_id = claims.user_id as i32;
-
     check_usage_limit(&state, params.provider, &model, &claims).await?;
 
-    match params.provider {
+    let stream = match params.provider {
         LanguageModelProvider::Anthropic => {
             let api_key = state
                 .config
@@ -185,37 +199,27 @@ async fn perform_completion(
             )
             .await?;
 
-            let mut recorder = UsageRecorder {
-                db: state.db.clone(),
-                executor: state.executor.clone(),
-                user_id,
-                provider: params.provider,
-                model,
-                token_count: 0,
-            };
-
-            let stream = chunks.map(move |event| {
-                let mut buffer = Vec::new();
-                event.map(|chunk| {
-                    match &chunk {
+            chunks
+                .map(move |event| {
+                    let chunk = event?;
+                    let (input_tokens, output_tokens) = match &chunk {
                         anthropic::Event::MessageStart {
                             message: anthropic::Response { usage, .. },
                         }
-                        | anthropic::Event::MessageDelta { usage, .. } => {
-                            recorder.token_count += usage.input_tokens.unwrap_or(0) as usize;
-                            recorder.token_count += usage.output_tokens.unwrap_or(0) as usize;
-                        }
-                        _ => {}
-                    }
+                        | anthropic::Event::MessageDelta { usage, .. } => (
+                            usage.input_tokens.unwrap_or(0) as usize,
+                            usage.output_tokens.unwrap_or(0) as usize,
+                        ),
+                        _ => (0, 0),
+                    };
 
-                    buffer.clear();
-                    serde_json::to_writer(&mut buffer, &chunk).unwrap();
-                    buffer.push(b'\n');
-                    buffer
+                    anyhow::Ok((
+                        serde_json::to_vec(&chunk).unwrap(),
+                        input_tokens,
+                        output_tokens,
+                    ))
                 })
-            });
-
-            Ok(Response::new(Body::wrap_stream(stream)))
+                .boxed()
         }
         LanguageModelProvider::OpenAi => {
             let api_key = state
@@ -232,17 +236,21 @@ async fn perform_completion(
             )
             .await?;
 
-            let stream = chunks.map(|event| {
-                let mut buffer = Vec::new();
-                event.map(|chunk| {
-                    buffer.clear();
-                    serde_json::to_writer(&mut buffer, &chunk).unwrap();
-                    buffer.push(b'\n');
-                    buffer
+            chunks
+                .map(|event| {
+                    event.map(|chunk| {
+                        let input_tokens =
+                            chunk.usage.as_ref().map_or(0, |u| u.prompt_tokens) as usize;
+                        let output_tokens =
+                            chunk.usage.as_ref().map_or(0, |u| u.completion_tokens) as usize;
+                        (
+                            serde_json::to_vec(&chunk).unwrap(),
+                            input_tokens,
+                            output_tokens,
+                        )
+                    })
                 })
-            });
-
-            Ok(Response::new(Body::wrap_stream(stream)))
+                .boxed()
         }
         LanguageModelProvider::Google => {
             let api_key = state
@@ -258,17 +266,20 @@ async fn perform_completion(
             )
             .await?;
 
-            let stream = chunks.map(|event| {
-                let mut buffer = Vec::new();
-                event.map(|chunk| {
-                    buffer.clear();
-                    serde_json::to_writer(&mut buffer, &chunk).unwrap();
-                    buffer.push(b'\n');
-                    buffer
+            chunks
+                .map(|event| {
+                    event.map(|chunk| {
+                        // TODO - implement token counting for Google AI
+                        let input_tokens = 0;
+                        let output_tokens = 0;
+                        (
+                            serde_json::to_vec(&chunk).unwrap(),
+                            input_tokens,
+                            output_tokens,
+                        )
+                    })
                 })
-            });
-
-            Ok(Response::new(Body::wrap_stream(stream)))
+                .boxed()
         }
         LanguageModelProvider::Zed => {
             let api_key = state
@@ -290,41 +301,63 @@ async fn perform_completion(
             )
             .await?;
 
-            let stream = chunks.map(|event| {
-                let mut buffer = Vec::new();
-                event.map(|chunk| {
-                    buffer.clear();
-                    serde_json::to_writer(&mut buffer, &chunk).unwrap();
-                    buffer.push(b'\n');
-                    buffer
+            chunks
+                .map(|event| {
+                    event.map(|chunk| {
+                        let input_tokens =
+                            chunk.usage.as_ref().map_or(0, |u| u.prompt_tokens) as usize;
+                        let output_tokens =
+                            chunk.usage.as_ref().map_or(0, |u| u.completion_tokens) as usize;
+                        (
+                            serde_json::to_vec(&chunk).unwrap(),
+                            input_tokens,
+                            output_tokens,
+                        )
+                    })
                 })
-            });
-
-            Ok(Response::new(Body::wrap_stream(stream)))
+                .boxed()
         }
-    }
+    };
+
+    Ok(Response::new(Body::wrap_stream(TokenCountingStream {
+        state,
+        claims,
+        provider: params.provider,
+        model,
+        input_tokens: 0,
+        output_tokens: 0,
+        inner_stream: stream,
+    })))
 }
 
 fn normalize_model_name(provider: LanguageModelProvider, name: String) -> String {
-    match provider {
-        LanguageModelProvider::Anthropic => {
-            for prefix in &[
-                "claude-3-5-sonnet",
-                "claude-3-haiku",
-                "claude-3-opus",
-                "claude-3-sonnet",
-            ] {
-                if name.starts_with(prefix) {
-                    return prefix.to_string();
-                }
-            }
-        }
-        LanguageModelProvider::OpenAi => {}
-        LanguageModelProvider::Google => {}
-        LanguageModelProvider::Zed => {}
-    }
+    let prefixes: &[_] = match provider {
+        LanguageModelProvider::Anthropic => &[
+            "claude-3-5-sonnet",
+            "claude-3-haiku",
+            "claude-3-opus",
+            "claude-3-sonnet",
+        ],
+        LanguageModelProvider::OpenAi => &[
+            "gpt-3.5-turbo",
+            "gpt-4-turbo-preview",
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4",
+        ],
+        LanguageModelProvider::Google => &[],
+        LanguageModelProvider::Zed => &[],
+    };
 
-    name
+    if let Some(prefix) = prefixes
+        .iter()
+        .filter(|&&prefix| name.starts_with(prefix))
+        .max_by_key(|&&prefix| prefix.len())
+    {
+        prefix.to_string()
+    } else {
+        name
+    }
 }
 
 async fn check_usage_limit(
@@ -377,26 +410,86 @@ async fn check_usage_limit(
 
     Ok(())
 }
-struct UsageRecorder {
-    db: Arc<LlmDatabase>,
-    executor: Executor,
-    user_id: i32,
+
+struct TokenCountingStream<S> {
+    state: Arc<LlmState>,
+    claims: LlmTokenClaims,
     provider: LanguageModelProvider,
     model: String,
-    token_count: usize,
+    input_tokens: usize,
+    output_tokens: usize,
+    inner_stream: S,
 }
 
-impl Drop for UsageRecorder {
+impl<S> Stream for TokenCountingStream<S>
+where
+    S: Stream<Item = Result<(Vec<u8>, usize, usize), anyhow::Error>> + Unpin,
+{
+    type Item = Result<Vec<u8>, anyhow::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner_stream).poll_next(cx) {
+            Poll::Ready(Some(Ok((mut bytes, input_tokens, output_tokens)))) => {
+                bytes.push(b'\n');
+                self.input_tokens += input_tokens;
+                self.output_tokens += output_tokens;
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S> Drop for TokenCountingStream<S> {
     fn drop(&mut self) {
-        let db = self.db.clone();
-        let user_id = self.user_id;
+        let state = self.state.clone();
+        let claims = self.claims.clone();
         let provider = self.provider;
         let model = std::mem::take(&mut self.model);
-        let token_count = self.token_count;
-        self.executor.spawn_detached(async move {
-            db.record_usage(user_id, provider, &model, token_count, Utc::now())
+        let input_token_count = self.input_tokens;
+        let output_token_count = self.output_tokens;
+        self.state.executor.spawn_detached(async move {
+            let usage = state
+                .db
+                .record_usage(
+                    claims.user_id as i32,
+                    provider,
+                    &model,
+                    input_token_count,
+                    output_token_count,
+                    Utc::now(),
+                )
                 .await
                 .log_err();
+
+            if let Some((clickhouse_client, usage)) = state.clickhouse_client.as_ref().zip(usage) {
+                report_llm_usage(
+                    clickhouse_client,
+                    LlmUsageEventRow {
+                        time: Utc::now().timestamp_millis(),
+                        user_id: claims.user_id as i32,
+                        is_staff: claims.is_staff,
+                        plan: match claims.plan {
+                            Plan::Free => "free".to_string(),
+                            Plan::ZedPro => "zed_pro".to_string(),
+                        },
+                        model,
+                        provider: provider.to_string(),
+                        input_token_count: input_token_count as u64,
+                        output_token_count: output_token_count as u64,
+                        requests_this_minute: usage.requests_this_minute as u64,
+                        tokens_this_minute: usage.tokens_this_minute as u64,
+                        tokens_this_day: usage.tokens_this_day as u64,
+                        input_tokens_this_month: usage.input_tokens_this_month as u64,
+                        output_tokens_this_month: usage.output_tokens_this_month as u64,
+                        spending_this_month: usage.spending_this_month as u64,
+                    },
+                )
+                .await
+                .log_err();
+            }
         })
     }
 }
