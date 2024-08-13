@@ -8,7 +8,7 @@ use anthropic::AnthropicError;
 use anyhow::{anyhow, bail, Context as _, Result};
 use client::{Client, PerformCompletionParams, UserStore, EXPIRED_LLM_TOKEN_HEADER_NAME};
 use collections::BTreeMap;
-use feature_flags::{FeatureFlagAppExt, LanguageModels};
+use feature_flags::{FeatureFlagAppExt, ZedPro};
 use futures::{future::BoxFuture, stream::BoxStream, AsyncBufReadExt, FutureExt, StreamExt};
 use gpui::{
     AnyElement, AnyView, AppContext, AsyncAppContext, FontWeight, Model, ModelContext,
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use settings::{Settings, SettingsStore};
 use smol::{
-    io::BufReader,
+    io::{AsyncReadExt, BufReader},
     lock::{RwLock, RwLockUpgradableReadGuard, RwLockWriteGuard},
 };
 use std::{future, sync::Arc};
@@ -168,13 +168,7 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
     fn provided_models(&self, cx: &AppContext) -> Vec<Arc<dyn LanguageModel>> {
         let mut models = BTreeMap::default();
 
-        let is_user = !cx.has_flag::<LanguageModels>();
-        if is_user {
-            models.insert(
-                anthropic::Model::Claude3_5Sonnet.id().to_string(),
-                CloudModel::Anthropic(anthropic::Model::Claude3_5Sonnet),
-            );
-        } else {
+        if cx.is_staff() {
             for model in anthropic::Model::iter() {
                 if !matches!(model, anthropic::Model::Custom { .. }) {
                     models.insert(model.id().to_string(), CloudModel::Anthropic(model));
@@ -218,6 +212,11 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
                 };
                 models.insert(model.id().to_string(), model.clone());
             }
+        } else {
+            models.insert(
+                anthropic::Model::Claude3_5Sonnet.id().to_string(),
+                CloudModel::Anthropic(anthropic::Model::Claude3_5Sonnet),
+            );
         }
 
         models
@@ -334,7 +333,7 @@ impl CloudLanguageModel {
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {token}"))
                 .body(serde_json::to_string(&body)?.into())?;
-            let response = http_client.send(request).await?;
+            let mut response = http_client.send(request).await?;
             if response.status().is_success() {
                 break response;
             } else if !did_retry
@@ -346,8 +345,10 @@ impl CloudLanguageModel {
                 did_retry = true;
                 token = llm_api_token.refresh(&client).await?;
             } else {
+                let mut body = String::new();
+                response.body_mut().read_to_string(&mut body).await?;
                 break Err(anyhow!(
-                    "cloud language model completion failed with status {}",
+                    "cloud language model completion failed with status {}: {body}",
                     response.status()
                 ))?;
             }
@@ -867,34 +868,39 @@ impl Render for ConfigurationView {
                     if is_pro {
                         "You have full access to Zed's hosted models from Anthropic, OpenAI, Google with faster speeds and higher limits through Zed Pro."
                     } else {
-                        "You have basic access to models from Anthropic, OpenAI, Google and more through the Zed AI Free plan."
+                        "You have basic access to models from Anthropic through the Zed AI Free plan."
                     }))
-                .child(
-                    if is_pro {
+                .children(if is_pro {
+                    Some(
                         h_flex().child(
-                        Button::new("manage_settings", "Manage Subscription")
-                            .style(ButtonStyle::Filled)
-                            .on_click(cx.listener(|_, _, cx| {
-                                cx.open_url(ACCOUNT_SETTINGS_URL)
-                            })))
-                    } else {
+                            Button::new("manage_settings", "Manage Subscription")
+                                .style(ButtonStyle::Filled)
+                                .on_click(
+                                    cx.listener(|_, _, cx| cx.open_url(ACCOUNT_SETTINGS_URL)),
+                                ),
+                        ),
+                    )
+                } else if cx.has_flag::<ZedPro>() {
+                    Some(
                         h_flex()
                             .gap_2()
                             .child(
-                        Button::new("learn_more", "Learn more")
-                            .style(ButtonStyle::Subtle)
-                            .on_click(cx.listener(|_, _, cx| {
-                                cx.open_url(ZED_AI_URL)
-                            })))
+                                Button::new("learn_more", "Learn more")
+                                    .style(ButtonStyle::Subtle)
+                                    .on_click(cx.listener(|_, _, cx| cx.open_url(ZED_AI_URL))),
+                            )
                             .child(
-                        Button::new("upgrade", "Upgrade")
-                            .style(ButtonStyle::Subtle)
-                            .color(Color::Accent)
-                            .on_click(cx.listener(|_, _, cx| {
-                                cx.open_url(ACCOUNT_SETTINGS_URL)
-                            })))
-                    },
-                )
+                                Button::new("upgrade", "Upgrade")
+                                    .style(ButtonStyle::Subtle)
+                                    .color(Color::Accent)
+                                    .on_click(
+                                        cx.listener(|_, _, cx| cx.open_url(ACCOUNT_SETTINGS_URL)),
+                                    ),
+                            ),
+                    )
+                } else {
+                    None
+                })
         } else {
             v_flex()
                 .gap_6()

@@ -6,9 +6,9 @@ use editor::{
     Editor,
 };
 use gpui::{AppContext, Model, View};
-use text::{ToOffset, ToPoint};
+use text::{Bias, ToOffset, ToPoint};
 use ui::{
-    div, h_flex, Color, Element as _, ParentElement as _, Styled, ViewContext, WindowContext,
+    div, h_flex, px, Color, Element as _, ParentElement as _, Styled, ViewContext, WindowContext,
 };
 
 use crate::{Context, ResolvedWorkflowStep, WorkflowSuggestion};
@@ -87,13 +87,14 @@ impl ContextInspector {
             .unwrap_or_else(|| Arc::from("Error fetching debug info"));
         self.editor.update(cx, |editor, cx| {
             let buffer = editor.buffer().read(cx).as_singleton()?;
-
+            let snapshot = buffer.read(cx).text_snapshot();
+            let start_offset = range.end.to_offset(&snapshot) + 1;
+            let start_offset = snapshot.clip_offset(start_offset, Bias::Right);
             let text_len = text.len();
-            let snapshot = buffer.update(cx, |this, cx| {
-                this.edit([(range.end..range.end, text)], None, cx);
-                this.text_snapshot()
+            buffer.update(cx, |this, cx| {
+                this.edit([(start_offset..start_offset, text)], None, cx);
             });
-            let start_offset = range.end.to_offset(&snapshot);
+
             let end_offset = start_offset + text_len;
             let multibuffer_snapshot = editor.buffer().read(cx).snapshot(cx);
             let anchor_before = multibuffer_snapshot.anchor_after(start_offset);
@@ -109,12 +110,7 @@ impl ContextInspector {
                             div()
                                 .w_full()
                                 .px(cx.gutter_dimensions.full_width())
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .border_t_1()
-                                        .border_color(Color::Warning.color(cx)),
-                                )
+                                .child(h_flex().h(px(1.)).bg(Color::Warning.color(cx)))
                                 .into_any()
                         }),
                         disposition: BlockDisposition::Below,

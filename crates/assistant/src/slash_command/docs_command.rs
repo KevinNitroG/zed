@@ -171,7 +171,7 @@ impl SlashCommand for DocsSlashCommand {
         query: String,
         _cancel: Arc<AtomicBool>,
         workspace: Option<WeakView<Workspace>>,
-        cx: &mut AppContext,
+        cx: &mut WindowContext,
     ) -> Task<Result<Vec<ArgumentCompletion>>> {
         self.ensure_rust_doc_providers_are_registered(workspace, cx);
 
@@ -275,6 +275,15 @@ impl SlashCommand for DocsSlashCommand {
                         ..
                     } => (provider, item_path),
                 };
+
+                if key.trim().is_empty() {
+                    let package_term = match provider.as_ref() {
+                        "docs-rs" | "rustdoc" => "crate",
+                        _ => "package",
+                    };
+
+                    bail!("no {package_term} name provided");
+                }
 
                 let store = store?;
 

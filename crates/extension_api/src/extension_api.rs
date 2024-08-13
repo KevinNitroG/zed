@@ -1,6 +1,6 @@
 //! The Zed Rust Extension API allows you write extensions for [Zed](https://zed.dev/) in Rust.
 
-/// Provides access to Zed settings.
+pub mod http_client;
 pub mod settings;
 
 use core::fmt;
@@ -18,9 +18,6 @@ pub use wit::{
     zed::extension::github::{
         github_release_by_tag_name, latest_github_release, GithubRelease, GithubReleaseAsset,
         GithubReleaseOptions,
-    },
-    zed::extension::http_client::{
-        fetch, fetch_stream, HttpMethod, HttpRequest, HttpResponse, HttpResponseStream,
     },
     zed::extension::nodejs::{
         node_binary_path, npm_install_package, npm_package_installed_version,
@@ -179,7 +176,7 @@ mod wit {
 
     wit_bindgen::generate!({
         skip: ["init-extension"],
-        path: "./wit/since_v0.0.7",
+        path: "./wit/since_v0.1.0",
     });
 }
 

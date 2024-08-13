@@ -1252,7 +1252,10 @@ impl Context {
 
             if let Some(step_end_index) = line.find("</step>") {
                 if in_step {
-                    let step_open_tag_end_ix = step_open_tag_start_ix + "<step>".len();
+                    let mut step_open_tag_end_ix = step_open_tag_start_ix + "<step>".len();
+                    if buffer.chars_at(step_open_tag_end_ix).next() == Some('\n') {
+                        step_open_tag_end_ix += 1;
+                    }
                     let mut step_end_tag_start_ix = line_start_offset + step_end_index;
                     let step_end_tag_end_ix = step_end_tag_start_ix + "</step>".len();
                     if buffer.reversed_chars_at(step_end_tag_start_ix).next() == Some('\n') {
@@ -2522,11 +2525,7 @@ pub struct SavedContextMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        assistant_panel, prompt_library,
-        slash_command::{active_command, file_command},
-        MessageId,
-    };
+    use crate::{assistant_panel, prompt_library, slash_command::file_command, MessageId};
     use assistant_slash_command::{ArgumentCompletion, SlashCommand};
     use fs::FakeFs;
     use gpui::{AppContext, TestAppContext, WeakView};
@@ -2883,7 +2882,6 @@ mod tests {
 
         let slash_command_registry = cx.update(SlashCommandRegistry::default_global);
         slash_command_registry.register_command(file_command::FileSlashCommand, false);
-        slash_command_registry.register_command(active_command::ActiveSlashCommand, false);
 
         let registry = Arc::new(LanguageRegistry::test(cx.executor()));
         let prompt_builder = Arc::new(PromptBuilder::new(None).unwrap());
@@ -3103,12 +3101,12 @@ mod tests {
                 vec![
                     (
                         Point::new(response_start_row + 2, 0)
-                            ..Point::new(response_start_row + 13, 3),
+                            ..Point::new(response_start_row + 12, 3),
                         WorkflowStepTestStatus::Pending
                     ),
                     (
-                        Point::new(response_start_row + 15, 0)
-                            ..Point::new(response_start_row + 26, 3),
+                        Point::new(response_start_row + 14, 0)
+                            ..Point::new(response_start_row + 24, 3),
                         WorkflowStepTestStatus::Pending
                     ),
                 ]
@@ -3140,12 +3138,12 @@ mod tests {
                 vec![
                     (
                         Point::new(response_start_row + 2, 0)
-                            ..Point::new(response_start_row + 13, 3),
+                            ..Point::new(response_start_row + 12, 3),
                         WorkflowStepTestStatus::Resolved
                     ),
                     (
-                        Point::new(response_start_row + 15, 0)
-                            ..Point::new(response_start_row + 26, 3),
+                        Point::new(response_start_row + 14, 0)
+                            ..Point::new(response_start_row + 24, 3),
                         WorkflowStepTestStatus::Pending
                     ),
                 ]
@@ -3550,7 +3548,7 @@ mod tests {
             _query: String,
             _cancel: Arc<AtomicBool>,
             _workspace: Option<WeakView<Workspace>>,
-            _cx: &mut AppContext,
+            _cx: &mut WindowContext,
         ) -> Task<Result<Vec<ArgumentCompletion>>> {
             Task::ready(Ok(vec![]))
         }
