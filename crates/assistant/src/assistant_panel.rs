@@ -34,12 +34,12 @@ use editor::{
 use editor::{display_map::CreaseId, FoldPlaceholder};
 use fs::Fs;
 use gpui::{
-    canvas, div, percentage, point, pulsating_between, Action, Animation, AnimationExt, AnyElement,
-    AnyView, AppContext, AsyncWindowContext, ClipboardItem, Context as _, DismissEvent, Empty,
-    Entity, EntityId, EventEmitter, FocusHandle, FocusableView, FontWeight, InteractiveElement,
-    IntoElement, Model, ParentElement, Pixels, ReadGlobal, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, Transformation, UpdateGlobal, View,
-    ViewContext, VisualContext, WeakView, WindowContext,
+    canvas, div, img, percentage, point, pulsating_between, size, Action, Animation, AnimationExt,
+    AnyElement, AnyView, AppContext, AsyncWindowContext, ClipboardEntry, ClipboardItem,
+    Context as _, DismissEvent, Empty, Entity, EntityId, EventEmitter, FocusHandle, FocusableView,
+    FontWeight, InteractiveElement, IntoElement, Model, ParentElement, Pixels, ReadGlobal, Render,
+    RenderImage, SharedString, Size, StatefulInteractiveElement, Styled, Subscription, Task,
+    Transformation, UpdateGlobal, View, VisualContext, WeakView, WindowContext,
 };
 use indexed_docs::IndexedDocsStore;
 use language::{
@@ -1465,7 +1465,7 @@ impl WorkflowStepStatus {
                     ("resolving-suggestion-animation", id),
                     Animation::new(Duration::from_secs(2))
                         .repeat()
-                        .with_easing(pulsating_between(0.2, 1.0)),
+                        .with_easing(pulsating_between(0.4, 0.8)),
                     |label, delta| label.alpha(delta),
                 )
                 .into_any_element(),
@@ -1552,7 +1552,7 @@ impl WorkflowStepStatus {
                             ("applying-step-transformation-label", id),
                             Animation::new(Duration::from_secs(2))
                                 .repeat()
-                                .with_easing(pulsating_between(0.2, 1.0)),
+                                .with_easing(pulsating_between(0.4, 0.8)),
                             |label, delta| label.alpha(delta),
                         ),
                 )
@@ -1715,6 +1715,7 @@ pub struct ContextEditor {
     lsp_adapter_delegate: Option<Arc<dyn LspAdapterDelegate>>,
     editor: View<Editor>,
     blocks: HashSet<CustomBlockId>,
+    image_blocks: HashSet<CustomBlockId>,
     scroll_position: Option<ScrollPosition>,
     remote_id: Option<workspace::ViewId>,
     pending_slash_command_creases: HashMap<Range<language::Anchor>, CreaseId>,
@@ -1773,6 +1774,7 @@ impl ContextEditor {
             editor,
             lsp_adapter_delegate,
             blocks: Default::default(),
+            image_blocks: Default::default(),
             scroll_position: None,
             remote_id: None,
             fs,
@@ -1789,6 +1791,7 @@ impl ContextEditor {
             show_accept_terms: false,
         };
         this.update_message_headers(cx);
+        this.update_image_blocks(cx);
         this.insert_slash_command_output_sections(sections, cx);
         this
     }
@@ -1811,7 +1814,7 @@ impl ContextEditor {
         self.run_command(
             command.source_range,
             &command.name,
-            command.argument.as_deref(),
+            &command.arguments,
             false,
             self.workspace.clone(),
             cx,
@@ -1970,9 +1973,11 @@ impl ContextEditor {
     }
 
     fn cancel(&mut self, _: &editor::actions::Cancel, cx: &mut ViewContext<Self>) {
+        self.error_message = None;
+
         if self
             .context
-            .update(cx, |context, _| context.cancel_last_assist())
+            .update(cx, |context, cx| context.cancel_last_assist(cx))
         {
             return;
         }
@@ -2117,7 +2122,7 @@ impl ContextEditor {
                 self.run_command(
                     command.source_range,
                     &command.name,
-                    command.argument.as_deref(),
+                    &command.arguments,
                     true,
                     workspace.clone(),
                     cx,
@@ -2131,19 +2136,13 @@ impl ContextEditor {
         &mut self,
         command_range: Range<language::Anchor>,
         name: &str,
-        argument: Option<&str>,
+        arguments: &[String],
         insert_trailing_newline: bool,
         workspace: WeakView<Workspace>,
         cx: &mut ViewContext<Self>,
     ) {
         if let Some(command) = SlashCommandRegistry::global(cx).command(name) {
-            let argument = argument.map(ToString::to_string);
-            let output = command.run(
-                argument.as_deref(),
-                workspace,
-                self.lsp_adapter_delegate.clone(),
-                cx,
-            );
+            let output = command.run(arguments, workspace, self.lsp_adapter_delegate.clone(), cx);
             self.context.update(cx, |context, cx| {
                 context.insert_command_output(command_range, output, insert_trailing_newline, cx)
             });
@@ -2161,6 +2160,7 @@ impl ContextEditor {
         match event {
             ContextEvent::MessagesEdited => {
                 self.update_message_headers(cx);
+                self.update_image_blocks(cx);
                 self.context.update(cx, |context, cx| {
                     context.save(Some(Duration::from_millis(500)), self.fs.clone(), cx);
                 });
@@ -2228,7 +2228,7 @@ impl ContextEditor {
                                             context_editor.run_command(
                                                 command.source_range.clone(),
                                                 &command.name,
-                                                command.argument.as_deref(),
+                                                &command.arguments,
                                                 false,
                                                 workspace.clone(),
                                                 cx,
@@ -2341,7 +2341,7 @@ impl ContextEditor {
                         self.run_command(
                             command.source_range,
                             &command.name,
-                            command.argument.as_deref(),
+                            &command.arguments,
                             false,
                             self.workspace.clone(),
                             cx,
@@ -2350,8 +2350,8 @@ impl ContextEditor {
                 }
             }
             ContextEvent::Operation(_) => {}
-            ContextEvent::AssistError(error_message) => {
-                self.error_message = Some(SharedString::from(error_message.clone()));
+            ContextEvent::ShowAssistError(error_message) => {
+                self.error_message = Some(error_message.clone());
             }
         }
     }
@@ -3001,7 +3001,7 @@ impl ContextEditor {
                                                 "pulsating-label",
                                                 Animation::new(Duration::from_secs(2))
                                                     .repeat()
-                                                    .with_easing(pulsating_between(0.2, 1.0)),
+                                                    .with_easing(pulsating_between(0.4, 0.8)),
                                                 |label, delta| label.alpha(delta),
                                             )
                                             .into_any_element()
@@ -3038,22 +3038,6 @@ impl ContextEditor {
                                     }
                                 });
 
-                            let trigger = Button::new("show-error", "Error")
-                                .color(Color::Error)
-                                .selected_label_color(Color::Error)
-                                .selected_icon_color(Color::Error)
-                                .icon(IconName::XCircle)
-                                .icon_color(Color::Error)
-                                .icon_size(IconSize::Small)
-                                .icon_position(IconPosition::Start)
-                                .tooltip(move |cx| {
-                                    Tooltip::with_meta(
-                                        "Error interacting with language model",
-                                        None,
-                                        "Click for more details",
-                                        cx,
-                                    )
-                                });
                             h_flex()
                                 .id(("message_header", message_id.as_u64()))
                                 .pl(cx.gutter_dimensions.full_width())
@@ -3062,22 +3046,59 @@ impl ContextEditor {
                                 .relative()
                                 .gap_1()
                                 .child(sender)
-                                .children(
-                                    if let MessageStatus::Error(error) = message.status.clone() {
-                                        Some(
-                                            PopoverMenu::new("show-error-popover")
-                                                .menu(move |cx| {
-                                                    Some(cx.new_view(|cx| ErrorPopover {
-                                                        error: error.clone(),
-                                                        focus_handle: cx.focus_handle(),
-                                                    }))
-                                                })
-                                                .trigger(trigger),
-                                        )
-                                    } else {
-                                        None
-                                    },
-                                )
+                                .children(match &message.status {
+                                    MessageStatus::Error(error) => Some(
+                                        Button::new("show-error", "Error")
+                                            .color(Color::Error)
+                                            .selected_label_color(Color::Error)
+                                            .selected_icon_color(Color::Error)
+                                            .icon(IconName::XCircle)
+                                            .icon_color(Color::Error)
+                                            .icon_size(IconSize::Small)
+                                            .icon_position(IconPosition::Start)
+                                            .tooltip(move |cx| {
+                                                Tooltip::with_meta(
+                                                    "Error interacting with language model",
+                                                    None,
+                                                    "Click for more details",
+                                                    cx,
+                                                )
+                                            })
+                                            .on_click({
+                                                let context = context.clone();
+                                                let error = error.clone();
+                                                move |_, cx| {
+                                                    context.update(cx, |_, cx| {
+                                                        cx.emit(ContextEvent::ShowAssistError(
+                                                            error.clone(),
+                                                        ));
+                                                    });
+                                                }
+                                            })
+                                            .into_any_element(),
+                                    ),
+                                    MessageStatus::Canceled => Some(
+                                        ButtonLike::new("canceled")
+                                            .child(
+                                                Icon::new(IconName::XCircle).color(Color::Disabled),
+                                            )
+                                            .child(
+                                                Label::new("Canceled")
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Disabled),
+                                            )
+                                            .tooltip(move |cx| {
+                                                Tooltip::with_meta(
+                                                    "Canceled",
+                                                    None,
+                                                    "Interaction with the assistant was canceled",
+                                                    cx,
+                                                )
+                                            })
+                                            .into_any_element(),
+                                    ),
+                                    _ => None,
+                                })
                                 .into_any_element()
                         }
                     }),
@@ -3305,12 +3326,108 @@ impl ContextEditor {
             }
 
             if spanned_messages > 1 {
-                cx.write_to_clipboard(ClipboardItem::new(copied_text));
+                cx.write_to_clipboard(ClipboardItem::new_string(copied_text));
                 return;
             }
         }
 
         cx.propagate();
+    }
+
+    fn paste(&mut self, _: &editor::actions::Paste, cx: &mut ViewContext<Self>) {
+        let images = if let Some(item) = cx.read_from_clipboard() {
+            item.into_entries()
+                .filter_map(|entry| {
+                    if let ClipboardEntry::Image(image) = entry {
+                        Some(image)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if images.is_empty() {
+            // If we didn't find any valid image data to paste, propagate to let normal pasting happen.
+            cx.propagate();
+        } else {
+            let mut image_positions = Vec::new();
+            self.editor.update(cx, |editor, cx| {
+                editor.transact(cx, |editor, cx| {
+                    let edits = editor
+                        .selections
+                        .all::<usize>(cx)
+                        .into_iter()
+                        .map(|selection| (selection.start..selection.end, "\n"));
+                    editor.edit(edits, cx);
+
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    for selection in editor.selections.all::<usize>(cx) {
+                        image_positions.push(snapshot.anchor_before(selection.end));
+                    }
+                });
+            });
+
+            self.context.update(cx, |context, cx| {
+                for image in images {
+                    let image_id = image.id();
+                    context.insert_image(image, cx);
+                    for image_position in image_positions.iter() {
+                        context.insert_image_anchor(image_id, image_position.text_anchor, cx);
+                    }
+                }
+            });
+        }
+    }
+
+    fn update_image_blocks(&mut self, cx: &mut ViewContext<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            let buffer = editor.buffer().read(cx).snapshot(cx);
+            let excerpt_id = *buffer.as_singleton().unwrap().0;
+            let old_blocks = std::mem::take(&mut self.image_blocks);
+            let new_blocks = self
+                .context
+                .read(cx)
+                .images(cx)
+                .filter_map(|image| {
+                    const MAX_HEIGHT_IN_LINES: u32 = 8;
+                    let anchor = buffer.anchor_in_excerpt(excerpt_id, image.anchor).unwrap();
+                    let image = image.render_image.clone();
+                    anchor.is_valid(&buffer).then(|| BlockProperties {
+                        position: anchor,
+                        height: MAX_HEIGHT_IN_LINES,
+                        style: BlockStyle::Sticky,
+                        render: Box::new(move |cx| {
+                            let image_size = size_for_image(
+                                &image,
+                                size(
+                                    cx.max_width - cx.gutter_dimensions.full_width(),
+                                    MAX_HEIGHT_IN_LINES as f32 * cx.line_height,
+                                ),
+                            );
+                            h_flex()
+                                .pl(cx.gutter_dimensions.full_width())
+                                .child(
+                                    img(image.clone())
+                                        .object_fit(gpui::ObjectFit::ScaleDown)
+                                        .w(image_size.width)
+                                        .h(image_size.height),
+                                )
+                                .into_any_element()
+                        }),
+
+                        disposition: BlockDisposition::Above,
+                        priority: 0,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            editor.remove_blocks(old_blocks, None, cx);
+            let ids = editor.insert_blocks(new_blocks, None, cx);
+            self.image_blocks = HashSet::from_iter(ids);
+        });
     }
 
     fn split(&mut self, _: &Split, cx: &mut ViewContext<Self>) {
@@ -3460,10 +3577,13 @@ impl ContextEditor {
         };
 
         let provider = LanguageModelRegistry::read_global(cx).active_provider();
-        let disabled = self.show_accept_terms
+
+        let needs_to_accept_terms = self.show_accept_terms
             && provider
                 .as_ref()
                 .map_or(false, |provider| provider.must_accept_terms(cx));
+        let has_active_error = self.error_message.is_some();
+        let disabled = needs_to_accept_terms || has_active_error;
 
         ButtonLike::new("send_button")
             .disabled(disabled)
@@ -3529,6 +3649,7 @@ impl Render for ContextEditor {
             .capture_action(cx.listener(ContextEditor::cancel))
             .capture_action(cx.listener(ContextEditor::save))
             .capture_action(cx.listener(ContextEditor::copy))
+            .capture_action(cx.listener(ContextEditor::paste))
             .capture_action(cx.listener(ContextEditor::cycle_message_role))
             .capture_action(cx.listener(ContextEditor::confirm_command))
             .on_action(cx.listener(ContextEditor::assist))
@@ -3557,6 +3678,48 @@ impl Render for ContextEditor {
                         .child(element),
                 )
             })
+            .when_some(self.error_message.clone(), |this, error_message| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right_4()
+                        .bottom_10()
+                        .max_w_96()
+                        .py_2()
+                        .px_3()
+                        .elevation_2(cx)
+                        .occlude()
+                        .child(
+                            v_flex()
+                                .gap_0p5()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .items_center()
+                                        .child(Icon::new(IconName::XCircle).color(Color::Error))
+                                        .child(
+                                            Label::new("Error interacting with language model")
+                                                .weight(FontWeight::SEMIBOLD),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("error-message")
+                                        .max_h_24()
+                                        .overflow_y_scroll()
+                                        .child(Label::new(error_message)),
+                                )
+                                .child(h_flex().justify_end().mt_1().child(
+                                    Button::new("dismiss", "Dismiss").on_click(cx.listener(
+                                        |this, _, cx| {
+                                            this.error_message = None;
+                                            cx.notify();
+                                        },
+                                    )),
+                                )),
+                        ),
+                )
+            })
             .child(
                 h_flex().flex_none().relative().child(
                     h_flex()
@@ -3566,41 +3729,6 @@ impl Render for ContextEditor {
                         .bottom_2()
                         .justify_end()
                         .child(self.render_send_button(cx)),
-                ),
-            )
-    }
-}
-
-struct ErrorPopover {
-    error: SharedString,
-    focus_handle: FocusHandle,
-}
-
-impl EventEmitter<DismissEvent> for ErrorPopover {}
-
-impl FocusableView for ErrorPopover {
-    fn focus_handle(&self, _: &AppContext) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl Render for ErrorPopover {
-    fn render(&mut self, cx: &mut ViewContext<Self>) -> impl IntoElement {
-        v_flex()
-            .mt_2()
-            .max_w_96()
-            .py_2()
-            .px_3()
-            .gap_0p5()
-            .elevation_2(cx)
-            .bg(cx.theme().colors().surface_background)
-            .occlude()
-            .child(Label::new("Error interacting with language model").weight(FontWeight::SEMIBOLD))
-            .child(Label::new(self.error.clone()))
-            .child(
-                h_flex().justify_end().mt_1().child(
-                    Button::new("dismiss", "Dismiss")
-                        .on_click(cx.listener(|_, _, cx| cx.emit(DismissEvent))),
                 ),
             )
     }
@@ -4040,6 +4168,7 @@ impl Render for ContextEditorToolbarItem {
 
         h_flex()
             .size_full()
+            .gap_2()
             .justify_between()
             .child(left_side)
             .child(right_side)
@@ -4368,7 +4497,7 @@ fn quote_selection_fold_placeholder(title: String, editor: WeakView<Editor>) -> 
                 ButtonLike::new(fold_id)
                     .style(ButtonStyle::Filled)
                     .layer(ElevationIndex::ElevatedSurface)
-                    .child(Icon::new(IconName::FileText))
+                    .child(Icon::new(IconName::TextSelect))
                     .child(Label::new(title.clone()).single_line())
                     .on_click(move |_, cx| {
                         editor
@@ -4432,11 +4561,10 @@ fn render_docs_slash_command_trailer(
     command: PendingSlashCommand,
     cx: &mut WindowContext,
 ) -> AnyElement {
-    let Some(argument) = command.argument else {
+    if command.arguments.is_empty() {
         return Empty.into_any();
-    };
-
-    let args = DocsSlashCommandArgs::parse(&argument);
+    }
+    let args = DocsSlashCommandArgs::parse(&command.arguments);
 
     let Some(store) = args
         .provider()
@@ -4554,6 +4682,30 @@ fn token_state(context: &Model<Context>, cx: &AppContext) -> Option<TokenState> 
         }
     };
     Some(token_state)
+}
+
+fn size_for_image(data: &RenderImage, max_size: Size<Pixels>) -> Size<Pixels> {
+    let image_size = data
+        .size(0)
+        .map(|dimension| Pixels::from(u32::from(dimension)));
+    let image_ratio = image_size.width / image_size.height;
+    let bounds_ratio = max_size.width / max_size.height;
+
+    if image_size.width > max_size.width || image_size.height > max_size.height {
+        if bounds_ratio > image_ratio {
+            size(
+                image_size.width * (max_size.height / image_size.height),
+                max_size.height,
+            )
+        } else {
+            size(
+                max_size.width,
+                image_size.height * (max_size.width / image_size.width),
+            )
+        }
+    } else {
+        size(image_size.width, image_size.height)
+    }
 }
 
 enum ConfigurationError {

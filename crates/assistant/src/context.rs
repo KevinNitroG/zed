@@ -13,27 +13,31 @@ use editor::Editor;
 use fs::{Fs, RemoveOptions};
 use futures::{
     future::{self, Shared},
+    stream::FuturesUnordered,
     FutureExt, StreamExt,
 };
 use gpui::{
-    AppContext, Context as _, EventEmitter, Model, ModelContext, Subscription, Task, UpdateGlobal,
-    View, WeakView,
+    AppContext, Context as _, EventEmitter, Image, Model, ModelContext, RenderImage, Subscription,
+    Task, UpdateGlobal, View, WeakView,
 };
+
 use language::{
     AnchorRangeExt, Bias, Buffer, BufferSnapshot, LanguageRegistry, OffsetRangeExt, ParseStatus,
     Point, ToOffset,
 };
 use language_model::{
-    LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage, LanguageModelTool,
-    Role,
+    LanguageModelImage, LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
+    LanguageModelTool, Role,
 };
 use open_ai::Model as OpenAiModel;
-use paths::contexts_dir;
+use paths::{context_images_dir, contexts_dir};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::{
     cmp::{self, Ordering},
+    collections::hash_map,
     fmt::Debug,
     iter, mem,
     ops::Range,
@@ -281,7 +285,7 @@ impl ContextOperation {
 
 #[derive(Debug, Clone)]
 pub enum ContextEvent {
-    AssistError(String),
+    ShowAssistError(SharedString),
     MessagesEdited,
     SummaryChanged,
     WorkflowStepsRemoved(Vec<Range<language::Anchor>>),
@@ -319,8 +323,23 @@ pub struct MessageMetadata {
     timestamp: clock::Lamport,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct MessageImage {
+    image_id: u64,
+    image: Shared<Task<Option<LanguageModelImage>>>,
+}
+
+impl PartialEq for MessageImage {
+    fn eq(&self, other: &Self) -> bool {
+        self.image_id == other.image_id
+    }
+}
+
+impl Eq for MessageImage {}
+
+#[derive(Clone, Debug)]
 pub struct Message {
+    pub image_offsets: SmallVec<[(usize, MessageImage); 1]>,
     pub offset_range: Range<usize>,
     pub index_range: Range<usize>,
     pub id: MessageId,
@@ -331,15 +350,58 @@ pub struct Message {
 
 impl Message {
     fn to_request_message(&self, buffer: &Buffer) -> LanguageModelRequestMessage {
+        let mut content = Vec::new();
+
+        let mut range_start = self.offset_range.start;
+        for (image_offset, message_image) in self.image_offsets.iter() {
+            if *image_offset != range_start {
+                content.push(
+                    buffer
+                        .text_for_range(range_start..*image_offset)
+                        .collect::<String>()
+                        .into(),
+                )
+            }
+
+            if let Some(image) = message_image.image.clone().now_or_never().flatten() {
+                content.push(language_model::MessageContent::Image(image));
+            }
+
+            range_start = *image_offset;
+        }
+        if range_start != self.offset_range.end {
+            content.push(
+                buffer
+                    .text_for_range(range_start..self.offset_range.end)
+                    .collect::<String>()
+                    .into(),
+            )
+        }
+
         LanguageModelRequestMessage {
             role: self.role,
-            content: buffer.text_for_range(self.offset_range.clone()).collect(),
+            content,
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageAnchor {
+    pub anchor: language::Anchor,
+    pub image_id: u64,
+    pub render_image: Arc<RenderImage>,
+    pub image: Shared<Task<Option<LanguageModelImage>>>,
+}
+
+impl PartialEq for ImageAnchor {
+    fn eq(&self, other: &Self) -> bool {
+        self.image_id == other.image_id
     }
 }
 
 struct PendingCompletion {
     id: usize,
+    assistant_message_id: MessageId,
     _task: Task<()>,
 }
 
@@ -605,6 +667,8 @@ pub struct Context {
     finished_slash_commands: HashSet<SlashCommandId>,
     slash_command_output_sections: Vec<SlashCommandOutputSection<language::Anchor>>,
     message_anchors: Vec<MessageAnchor>,
+    images: HashMap<u64, (Arc<RenderImage>, Shared<Task<Option<LanguageModelImage>>>)>,
+    image_anchors: Vec<ImageAnchor>,
     messages_metadata: HashMap<MessageId, MessageMetadata>,
     summary: Option<ContextSummary>,
     pending_summary: Task<Option<()>>,
@@ -677,6 +741,8 @@ impl Context {
             pending_ops: Vec::new(),
             operations: Vec::new(),
             message_anchors: Default::default(),
+            image_anchors: Default::default(),
+            images: Default::default(),
             messages_metadata: Default::default(),
             pending_slash_commands: Vec::new(),
             finished_slash_commands: HashSet::default(),
@@ -736,6 +802,11 @@ impl Context {
                     id: message.id,
                     start: message.offset_range.start,
                     metadata: self.messages_metadata[&message.id].clone(),
+                    image_offsets: message
+                        .image_offsets
+                        .iter()
+                        .map(|image_offset| (image_offset.0, image_offset.1.image_id))
+                        .collect(),
                 })
                 .collect(),
             summary: self
@@ -1135,21 +1206,31 @@ impl Context {
             while let Some(line) = lines.next() {
                 if let Some(command_line) = SlashCommandLine::parse(line) {
                     let name = &line[command_line.name.clone()];
-                    let argument = command_line.argument.as_ref().and_then(|argument| {
-                        (!argument.is_empty()).then_some(&line[argument.clone()])
-                    });
+                    let arguments = command_line
+                        .arguments
+                        .iter()
+                        .filter_map(|argument_range| {
+                            if argument_range.is_empty() {
+                                None
+                            } else {
+                                line.get(argument_range.clone())
+                            }
+                        })
+                        .map(ToOwned::to_owned)
+                        .collect::<SmallVec<_>>();
                     if let Some(command) = SlashCommandRegistry::global(cx).command(name) {
-                        if !command.requires_argument() || argument.is_some() {
+                        if !command.requires_argument() || !arguments.is_empty() {
                             let start_ix = offset + command_line.name.start - 1;
                             let end_ix = offset
                                 + command_line
-                                    .argument
+                                    .arguments
+                                    .last()
                                     .map_or(command_line.name.end, |argument| argument.end);
                             let source_range =
                                 buffer.anchor_after(start_ix)..buffer.anchor_after(end_ix);
                             let pending_command = PendingSlashCommand {
                                 name: name.to_string(),
-                                argument: argument.map(ToString::to_string),
+                                arguments,
                                 source_range,
                                 status: PendingSlashCommandStatus::Idle,
                             };
@@ -1339,7 +1420,7 @@ impl Context {
 
                         request.messages.push(LanguageModelRequestMessage {
                             role: Role::User,
-                            content: prompt,
+                            content: vec![prompt.into()],
                         });
 
                         // Invoke the model to get its edit suggestions for this workflow step.
@@ -1642,6 +1723,8 @@ impl Context {
             .insert_message_after(assistant_message.id, Role::User, MessageStatus::Done, cx)
             .unwrap();
 
+        let pending_completion_id = post_inc(&mut self.completion_count);
+
         let task = cx.spawn({
             |this, mut cx| async move {
                 let stream = model.stream_completion(request, &cx);
@@ -1690,10 +1773,9 @@ impl Context {
                         })?;
                         smol::future::yield_now().await;
                     }
-
                     this.update(&mut cx, |this, cx| {
                         this.pending_completions
-                            .retain(|completion| completion.id != this.completion_count);
+                            .retain(|completion| completion.id != pending_completion_id);
                         this.summarize(false, cx);
                     })?;
 
@@ -1708,7 +1790,9 @@ impl Context {
                         .map(|error| error.to_string().trim().to_string());
 
                     if let Some(error_message) = error_message.as_ref() {
-                        cx.emit(ContextEvent::AssistError(error_message.to_string()));
+                        cx.emit(ContextEvent::ShowAssistError(SharedString::from(
+                            error_message.clone(),
+                        )));
                     }
 
                     this.update_metadata(assistant_message_id, cx, |metadata| {
@@ -1735,7 +1819,8 @@ impl Context {
         });
 
         self.pending_completions.push(PendingCompletion {
-            id: post_inc(&mut self.completion_count),
+            id: pending_completion_id,
+            assistant_message_id: assistant_message.id,
             _task: task,
         });
 
@@ -1743,20 +1828,31 @@ impl Context {
     }
 
     pub fn to_completion_request(&self, cx: &AppContext) -> LanguageModelRequest {
-        let messages = self
+        let buffer = self.buffer.read(cx);
+        let request_messages = self
             .messages(cx)
-            .filter(|message| matches!(message.status, MessageStatus::Done))
-            .map(|message| message.to_request_message(self.buffer.read(cx)));
+            .filter(|message| message.status == MessageStatus::Done)
+            .map(|message| message.to_request_message(&buffer))
+            .collect();
 
         LanguageModelRequest {
-            messages: messages.collect(),
+            messages: request_messages,
             stop: vec![],
             temperature: 1.0,
         }
     }
 
-    pub fn cancel_last_assist(&mut self) -> bool {
-        self.pending_completions.pop().is_some()
+    pub fn cancel_last_assist(&mut self, cx: &mut ModelContext<Self>) -> bool {
+        if let Some(pending_completion) = self.pending_completions.pop() {
+            self.update_metadata(pending_completion.assistant_message_id, cx, |metadata| {
+                if metadata.status == MessageStatus::Pending {
+                    metadata.status = MessageStatus::Canceled;
+                }
+            });
+            true
+        } else {
+            false
+        }
     }
 
     pub fn cycle_message_roles(&mut self, ids: HashSet<MessageId>, cx: &mut ModelContext<Self>) {
@@ -1847,6 +1943,55 @@ impl Context {
         }
     }
 
+    pub fn insert_image(&mut self, image: Image, cx: &mut ModelContext<Self>) -> Option<()> {
+        if let hash_map::Entry::Vacant(entry) = self.images.entry(image.id()) {
+            entry.insert((
+                image.to_image_data(cx).log_err()?,
+                LanguageModelImage::from_image(image, cx).shared(),
+            ));
+        }
+
+        Some(())
+    }
+
+    pub fn insert_image_anchor(
+        &mut self,
+        image_id: u64,
+        anchor: language::Anchor,
+        cx: &mut ModelContext<Self>,
+    ) -> bool {
+        cx.emit(ContextEvent::MessagesEdited);
+
+        let buffer = self.buffer.read(cx);
+        let insertion_ix = match self
+            .image_anchors
+            .binary_search_by(|existing_anchor| anchor.cmp(&existing_anchor.anchor, buffer))
+        {
+            Ok(ix) => ix,
+            Err(ix) => ix,
+        };
+
+        if let Some((render_image, image)) = self.images.get(&image_id) {
+            self.image_anchors.insert(
+                insertion_ix,
+                ImageAnchor {
+                    anchor,
+                    image_id,
+                    image: image.clone(),
+                    render_image: render_image.clone(),
+                },
+            );
+
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn images<'a>(&'a self, _cx: &'a AppContext) -> impl 'a + Iterator<Item = ImageAnchor> {
+        self.image_anchors.iter().cloned()
+    }
+
     pub fn split_message(
         &mut self,
         range: Range<usize>,
@@ -1865,7 +2010,10 @@ impl Context {
             let mut edited_buffer = false;
 
             let mut suffix_start = None;
-            if range.start > message.offset_range.start && range.end < message.offset_range.end - 1
+
+            // TODO: why did this start panicking?
+            if range.start > message.offset_range.start
+                && range.end < message.offset_range.end.saturating_sub(1)
             {
                 if self.buffer.read(cx).chars_at(range.end).next() == Some('\n') {
                     suffix_start = Some(range.end + 1);
@@ -2007,7 +2155,9 @@ impl Context {
                 .map(|message| message.to_request_message(self.buffer.read(cx)))
                 .chain(Some(LanguageModelRequestMessage {
                     role: Role::User,
-                    content: "Summarize the context into a short title without punctuation.".into(),
+                    content: vec![
+                        "Summarize the context into a short title without punctuation.".into(),
+                    ],
                 }));
             let request = LanguageModelRequest {
                 messages: messages.collect(),
@@ -2109,25 +2259,55 @@ impl Context {
 
     pub fn messages<'a>(&'a self, cx: &'a AppContext) -> impl 'a + Iterator<Item = Message> {
         let buffer = self.buffer.read(cx);
-        let mut message_anchors = self.message_anchors.iter().enumerate().peekable();
+        let messages = self.message_anchors.iter().enumerate();
+        let images = self.image_anchors.iter();
+
+        Self::messages_from_iters(buffer, &self.messages_metadata, messages, images)
+    }
+
+    pub fn messages_from_iters<'a>(
+        buffer: &'a Buffer,
+        metadata: &'a HashMap<MessageId, MessageMetadata>,
+        messages: impl Iterator<Item = (usize, &'a MessageAnchor)> + 'a,
+        images: impl Iterator<Item = &'a ImageAnchor> + 'a,
+    ) -> impl 'a + Iterator<Item = Message> {
+        let mut messages = messages.peekable();
+        let mut images = images.peekable();
+
         iter::from_fn(move || {
-            if let Some((start_ix, message_anchor)) = message_anchors.next() {
-                let metadata = self.messages_metadata.get(&message_anchor.id)?;
+            if let Some((start_ix, message_anchor)) = messages.next() {
+                let metadata = metadata.get(&message_anchor.id)?;
+
                 let message_start = message_anchor.start.to_offset(buffer);
                 let mut message_end = None;
                 let mut end_ix = start_ix;
-                while let Some((_, next_message)) = message_anchors.peek() {
+                while let Some((_, next_message)) = messages.peek() {
                     if next_message.start.is_valid(buffer) {
                         message_end = Some(next_message.start);
                         break;
                     } else {
                         end_ix += 1;
-                        message_anchors.next();
+                        messages.next();
                     }
                 }
-                let message_end = message_end
-                    .unwrap_or(language::Anchor::MAX)
-                    .to_offset(buffer);
+                let message_end_anchor = message_end.unwrap_or(language::Anchor::MAX);
+                let message_end = message_end_anchor.to_offset(buffer);
+
+                let mut image_offsets = SmallVec::new();
+                while let Some(image_anchor) = images.peek() {
+                    if image_anchor.anchor.cmp(&message_end_anchor, buffer).is_lt() {
+                        image_offsets.push((
+                            image_anchor.anchor.to_offset(buffer),
+                            MessageImage {
+                                image_id: image_anchor.image_id,
+                                image: image_anchor.image.clone(),
+                            },
+                        ));
+                        images.next();
+                    } else {
+                        break;
+                    }
+                }
 
                 return Some(Message {
                     index_range: start_ix..end_ix,
@@ -2136,6 +2316,7 @@ impl Context {
                     anchor: message_anchor.start,
                     role: metadata.role,
                     status: metadata.status.clone(),
+                    image_offsets,
                 });
             }
             None
@@ -2173,6 +2354,9 @@ impl Context {
             })?;
 
             if let Some(summary) = summary {
+                this.read_with(&cx, |this, cx| this.serialize_images(fs.clone(), cx))?
+                    .await;
+
                 let context = this.read_with(&cx, |this, cx| this.serialize(cx))?;
                 let mut discriminant = 1;
                 let mut new_path;
@@ -2212,6 +2396,45 @@ impl Context {
         });
     }
 
+    pub fn serialize_images(&self, fs: Arc<dyn Fs>, cx: &AppContext) -> Task<()> {
+        let mut images_to_save = self
+            .images
+            .iter()
+            .map(|(id, (_, llm_image))| {
+                let fs = fs.clone();
+                let llm_image = llm_image.clone();
+                let id = *id;
+                async move {
+                    if let Some(llm_image) = llm_image.await {
+                        let path: PathBuf =
+                            context_images_dir().join(&format!("{}.png.base64", id));
+                        if fs
+                            .metadata(path.as_path())
+                            .await
+                            .log_err()
+                            .flatten()
+                            .is_none()
+                        {
+                            fs.atomic_write(path, llm_image.source.to_string())
+                                .await
+                                .log_err();
+                        }
+                    }
+                }
+            })
+            .collect::<FuturesUnordered<_>>();
+        cx.background_executor().spawn(async move {
+            if fs
+                .create_dir(context_images_dir().as_ref())
+                .await
+                .log_err()
+                .is_some()
+            {
+                while let Some(_) = images_to_save.next().await {}
+            }
+        })
+    }
+
     pub(crate) fn custom_summary(&mut self, custom_summary: String, cx: &mut ModelContext<Self>) {
         let timestamp = self.next_timestamp();
         let summary = self.summary.get_or_insert(ContextSummary::default());
@@ -2248,7 +2471,7 @@ impl ContextVersion {
 #[derive(Debug, Clone)]
 pub struct PendingSlashCommand {
     pub name: String,
-    pub argument: Option<String>,
+    pub arguments: SmallVec<[String; 3]>,
     pub status: PendingSlashCommandStatus,
     pub source_range: Range<language::Anchor>,
 }
@@ -2265,6 +2488,9 @@ pub struct SavedMessage {
     pub id: MessageId,
     pub start: usize,
     pub metadata: MessageMetadata,
+    #[serde(default)]
+    // This is defaulted for backwards compatibility with JSON files created before August 2024. We didn't always have this field.
+    pub image_offsets: Vec<(usize, u64)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2447,6 +2673,7 @@ impl SavedContextV0_3_0 {
                             status: metadata.status.clone(),
                             timestamp,
                         },
+                        image_offsets: Vec::new(),
                     })
                 })
                 .collect(),
@@ -3545,7 +3772,7 @@ mod tests {
 
         fn complete_argument(
             self: Arc<Self>,
-            _query: String,
+            _arguments: &[String],
             _cancel: Arc<AtomicBool>,
             _workspace: Option<WeakView<Workspace>>,
             _cx: &mut WindowContext,
@@ -3559,7 +3786,7 @@ mod tests {
 
         fn run(
             self: Arc<Self>,
-            _argument: Option<&str>,
+            _arguments: &[String],
             _workspace: WeakView<Workspace>,
             _delegate: Option<Arc<dyn LspAdapterDelegate>>,
             _cx: &mut WindowContext,
