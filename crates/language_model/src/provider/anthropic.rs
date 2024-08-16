@@ -1,7 +1,7 @@
 use crate::{
-    settings::AllLanguageModelSettings, LanguageModel, LanguageModelId, LanguageModelName,
-    LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
-    LanguageModelProviderState, LanguageModelRequest, RateLimiter, Role,
+    settings::AllLanguageModelSettings, LanguageModel, LanguageModelCacheConfiguration,
+    LanguageModelId, LanguageModelName, LanguageModelProvider, LanguageModelProviderId,
+    LanguageModelProviderName, LanguageModelProviderState, LanguageModelRequest, RateLimiter, Role,
 };
 use anthropic::AnthropicError;
 use anyhow::{anyhow, Context as _, Result};
@@ -38,6 +38,8 @@ pub struct AvailableModel {
     pub name: String,
     pub max_tokens: usize,
     pub tool_override: Option<String>,
+    pub cache_configuration: Option<LanguageModelCacheConfiguration>,
+    pub max_output_tokens: Option<u32>,
 }
 
 pub struct AnthropicLanguageModelProvider {
@@ -171,6 +173,14 @@ impl LanguageModelProvider for AnthropicLanguageModelProvider {
                     name: model.name.clone(),
                     max_tokens: model.max_tokens,
                     tool_override: model.tool_override.clone(),
+                    cache_configuration: model.cache_configuration.as_ref().map(|config| {
+                        anthropic::AnthropicModelCacheConfiguration {
+                            max_cache_anchors: config.max_cache_anchors,
+                            should_speculate: config.should_speculate,
+                            min_total_token: config.min_total_token,
+                        }
+                    }),
+                    max_output_tokens: model.max_output_tokens,
                 },
             );
         }
@@ -323,6 +333,10 @@ impl LanguageModel for AnthropicModel {
         self.model.max_token_count()
     }
 
+    fn max_output_tokens(&self) -> Option<u32> {
+        Some(self.model.max_output_tokens())
+    }
+
     fn count_tokens(
         &self,
         request: LanguageModelRequest,
@@ -336,7 +350,8 @@ impl LanguageModel for AnthropicModel {
         request: LanguageModelRequest,
         cx: &AsyncAppContext,
     ) -> BoxFuture<'static, Result<BoxStream<'static, Result<String>>>> {
-        let request = request.into_anthropic(self.model.id().into());
+        let request =
+            request.into_anthropic(self.model.id().into(), self.model.max_output_tokens());
         let request = self.stream_completion(request, cx);
         let future = self.request_limiter.stream(async move {
             let response = request.await.map_err(|err| anyhow!(err))?;
@@ -351,6 +366,16 @@ impl LanguageModel for AnthropicModel {
         .boxed()
     }
 
+    fn cache_configuration(&self) -> Option<LanguageModelCacheConfiguration> {
+        self.model
+            .cache_configuration()
+            .map(|config| LanguageModelCacheConfiguration {
+                max_cache_anchors: config.max_cache_anchors,
+                should_speculate: config.should_speculate,
+                min_total_token: config.min_total_token,
+            })
+    }
+
     fn use_any_tool(
         &self,
         request: LanguageModelRequest,
@@ -359,7 +384,10 @@ impl LanguageModel for AnthropicModel {
         input_schema: serde_json::Value,
         cx: &AsyncAppContext,
     ) -> BoxFuture<'static, Result<BoxStream<'static, Result<String>>>> {
-        let mut request = request.into_anthropic(self.model.tool_model_id().into());
+        let mut request = request.into_anthropic(
+            self.model.tool_model_id().into(),
+            self.model.max_output_tokens(),
+        );
         request.tool_choice = Some(anthropic::ToolChoice::Tool {
             name: tool_name.clone(),
         });

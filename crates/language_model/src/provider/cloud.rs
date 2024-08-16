@@ -1,7 +1,7 @@
 use super::open_ai::count_open_ai_tokens;
 use crate::{
-    settings::AllLanguageModelSettings, CloudModel, LanguageModel, LanguageModelId,
-    LanguageModelName, LanguageModelProviderId, LanguageModelProviderName,
+    settings::AllLanguageModelSettings, CloudModel, LanguageModel, LanguageModelCacheConfiguration,
+    LanguageModelId, LanguageModelName, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, RateLimiter, ZedModel,
 };
 use anthropic::AnthropicError;
@@ -56,6 +56,8 @@ pub struct AvailableModel {
     name: String,
     max_tokens: usize,
     tool_override: Option<String>,
+    cache_configuration: Option<LanguageModelCacheConfiguration>,
+    max_output_tokens: Option<u32>,
 }
 
 pub struct CloudLanguageModelProvider {
@@ -202,6 +204,14 @@ impl LanguageModelProvider for CloudLanguageModelProvider {
                             name: model.name.clone(),
                             max_tokens: model.max_tokens,
                             tool_override: model.tool_override.clone(),
+                            cache_configuration: model.cache_configuration.as_ref().map(|config| {
+                                anthropic::AnthropicModelCacheConfiguration {
+                                    max_cache_anchors: config.max_cache_anchors,
+                                    should_speculate: config.should_speculate,
+                                    min_total_token: config.min_total_token,
+                                }
+                            }),
+                            max_output_tokens: model.max_output_tokens,
                         })
                     }
                     AvailableProvider::OpenAi => CloudModel::OpenAi(open_ai::Model::Custom {
@@ -438,7 +448,7 @@ impl LanguageModel for CloudLanguageModel {
     ) -> BoxFuture<'static, Result<BoxStream<'static, Result<String>>>> {
         match &self.model {
             CloudModel::Anthropic(model) => {
-                let request = request.into_anthropic(model.id().into());
+                let request = request.into_anthropic(model.id().into(), model.max_output_tokens());
                 let client = self.client.clone();
                 let llm_api_token = self.llm_api_token.clone();
                 let future = self.request_limiter.stream(async move {
@@ -548,7 +558,8 @@ impl LanguageModel for CloudLanguageModel {
 
         match &self.model {
             CloudModel::Anthropic(model) => {
-                let mut request = request.into_anthropic(model.tool_model_id().into());
+                let mut request =
+                    request.into_anthropic(model.tool_model_id().into(), model.max_output_tokens());
                 request.tool_choice = Some(anthropic::ToolChoice::Tool {
                     name: tool_name.clone(),
                 });
