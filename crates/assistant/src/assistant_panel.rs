@@ -2088,14 +2088,14 @@ impl ContextEditor {
         command_range: Range<language::Anchor>,
         name: &str,
         arguments: &[String],
-        insert_trailing_newline: bool,
+        ensure_trailing_newline: bool,
         workspace: WeakView<Workspace>,
         cx: &mut ViewContext<Self>,
     ) {
         if let Some(command) = SlashCommandRegistry::global(cx).command(name) {
             let output = command.run(arguments, workspace, self.lsp_adapter_delegate.clone(), cx);
             self.context.update(cx, |context, cx| {
-                context.insert_command_output(command_range, output, insert_trailing_newline, cx)
+                context.insert_command_output(command_range, output, ensure_trailing_newline, cx)
             });
         }
     }
@@ -3745,17 +3745,15 @@ impl Render for ContextEditor {
                                         })
                                         .tooltip(move |cx| {
                                             cx.new_view(|cx| {
-                                                Tooltip::new("Insert Selection")
-                                                    .meta("Press to quote via keyboard")
-                                                    .key_binding(focus_handle.as_ref().and_then(
-                                                        |handle| {
-                                                            KeyBinding::for_action_in(
-                                                                &QuoteSelection,
-                                                                &handle,
-                                                                cx,
-                                                            )
-                                                        },
-                                                    ))
+                                                Tooltip::new("Insert Selection").key_binding(
+                                                    focus_handle.as_ref().and_then(|handle| {
+                                                        KeyBinding::for_action_in(
+                                                            &QuoteSelection,
+                                                            &handle,
+                                                            cx,
+                                                        )
+                                                    }),
+                                                )
                                             })
                                             .into()
                                         }),
