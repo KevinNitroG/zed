@@ -142,7 +142,7 @@ impl TerminalPanel {
             cx.subscribe(&pane, Self::handle_pane_event),
         ];
         let project = workspace.project().read(cx);
-        let enabled = project.is_local() || project.supports_remote_terminal(cx);
+        let enabled = project.is_local_or_ssh() || project.supports_remote_terminal(cx);
         let this = Self {
             pane,
             fs: workspace.app_state().fs.clone(),
@@ -886,7 +886,11 @@ fn to_windows_shell_variable(shell_type: WindowsShellType, input: String) -> Str
 
 #[cfg(target_os = "windows")]
 fn to_windows_shell_type(shell: &str) -> WindowsShellType {
-    if shell == "powershell" || shell.ends_with("powershell.exe") {
+    if shell == "powershell"
+        || shell.ends_with("powershell.exe")
+        || shell == "pwsh"
+        || shell.ends_with("pwsh.exe")
+    {
         WindowsShellType::Powershell
     } else if shell == "cmd" || shell.ends_with("cmd.exe") {
         WindowsShellType::Cmd

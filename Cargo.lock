@@ -83,7 +83,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.24.1-dev"
-source = "git+https://github.com/alacritty/alacritty?rev=cacdb5bb3b72bad2c729227537979d95af75978f#cacdb5bb3b72bad2c729227537979d95af75978f"
+source = "git+https://github.com/alacritty/alacritty?rev=91d034ff8b53867143c005acfaa14609147c9a2c#91d034ff8b53867143c005acfaa14609147c9a2c"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.6.0",
@@ -2266,6 +2266,7 @@ dependencies = [
  "plist",
  "release_channel",
  "serde",
+ "tempfile",
  "util",
 ]
 
@@ -2350,6 +2351,7 @@ dependencies = [
  "thiserror",
  "time",
  "tiny_http",
+ "tokio-socks",
  "url",
  "util",
  "windows 0.58.0",
@@ -6140,9 +6142,9 @@ checksum = "03087c2bad5e1034e8cace5926dec053fb3790248370865f5117a7d0213354c8"
 
 [[package]]
 name = "libc"
-version = "0.2.155"
+version = "0.2.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97b3888a4aecf77e811145cadf6eef5901f4782c53886191b2f693f24761847c"
+checksum = "d8adc4bb1803a324070e64a98ae98f38934d91957a99cfb3a43dcbc01bc56439"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -11349,6 +11351,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-socks"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d4770b8024672c1101b3f6733eab95b18007dbe0847a8afe341fcf79e06043f"
+dependencies = [
+ "either",
+ "futures-io",
+ "futures-util",
+ "thiserror",
+]
+
+[[package]]
 name = "tokio-stream"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11657,9 +11671,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-css"
-version = "0.21.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2f806f96136762b0121f5fdd7172a3dcd8f42d37a2f23ed7f11b35895e20eb4"
+checksum = "5e08e324b1cf60fd3291774b49724c66de2ce8fcf4d358d0b4b82e37b41b1c9b"
 dependencies = [
  "cc",
  "tree-sitter",
@@ -11724,9 +11738,9 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter-html"
-version = "0.20.3"
+version = "0.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95b3492b08a786bf5cc79feb0ef2ff3b115d5174364e0ddfd7860e0b9b088b53"
+checksum = "8766b5ad3721517f8259e6394aefda9c686aebf7a8c74ab8624f2c3b46902fd5"
 dependencies = [
  "cc",
  "tree-sitter",
@@ -13913,6 +13927,7 @@ dependencies = [
  "terminal_view",
  "theme",
  "theme_selector",
+ "time",
  "tree-sitter-md",
  "tree-sitter-rust",
  "ui",
