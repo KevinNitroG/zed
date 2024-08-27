@@ -1,12 +1,34 @@
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
 use anyhow::{anyhow, Context as _, Result};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
+use fs::Fs;
+use futures::SinkExt;
 use gpui::{AppContext, AsyncAppContext, EntityId, EventEmitter, Model, ModelContext, WeakModel};
+use postage::oneshot;
 use rpc::{
     proto::{self, AnyProtoClient},
     TypedEnvelope,
 };
+use smol::{
+    channel::{Receiver, Sender},
+    stream::StreamExt,
+};
 use text::ReplicaId;
-use worktree::{ProjectEntryId, Worktree, WorktreeId};
+use util::ResultExt;
+use worktree::{Entry, ProjectEntryId, Worktree, WorktreeId, WorktreeSettings};
+
+use crate::{search::SearchQuery, ProjectPath};
+
+struct MatchingEntry {
+    worktree_path: Arc<Path>,
+    path: ProjectPath,
+    respond: oneshot::Sender<ProjectPath>,
+}
 
 pub struct WorktreeStore {
     is_shared: bool,
@@ -59,6 +81,15 @@ impl WorktreeStore {
     ) -> Option<Model<Worktree>> {
         self.worktrees()
             .find(|worktree| worktree.read(cx).contains_entry(entry_id))
+    }
+
+    pub fn entry_for_id<'a>(
+        &'a self,
+        entry_id: ProjectEntryId,
+        cx: &'a AppContext,
+    ) -> Option<&'a Entry> {
+        self.worktrees()
+            .find_map(|worktree| worktree.read(cx).entry_for_id(entry_id))
     }
 
     pub fn add(&mut self, worktree: &Model<Worktree>, cx: &mut ModelContext<Self>) {
@@ -236,6 +267,234 @@ impl WorktreeStore {
                 }
             }
         }
+    }
+
+    /// search over all worktrees and return buffers that *might* match the search.
+    pub fn find_search_candidates(
+        &self,
+        query: SearchQuery,
+        limit: usize,
+        open_entries: HashSet<ProjectEntryId>,
+        fs: Arc<dyn Fs>,
+        cx: &ModelContext<Self>,
+    ) -> Receiver<ProjectPath> {
+        let snapshots = self
+            .visible_worktrees(cx)
+            .filter_map(|tree| {
+                let tree = tree.read(cx);
+                Some((tree.snapshot(), tree.as_local()?.settings()))
+            })
+            .collect::<Vec<_>>();
+
+        let executor = cx.background_executor().clone();
+
+        // We want to return entries in the order they are in the worktrees, so we have one
+        // thread that iterates over the worktrees (and ignored directories) as necessary,
+        // and pushes a oneshot::Receiver to the output channel and a oneshot::Sender to the filter
+        // channel.
+        // We spawn a number of workers that take items from the filter channel and check the query
+        // against the version of the file on disk.
+        let (filter_tx, filter_rx) = smol::channel::bounded(64);
+        let (output_tx, mut output_rx) = smol::channel::bounded(64);
+        let (matching_paths_tx, matching_paths_rx) = smol::channel::unbounded();
+
+        let input = cx.background_executor().spawn({
+            let fs = fs.clone();
+            let query = query.clone();
+            async move {
+                Self::find_candidate_paths(
+                    fs,
+                    snapshots,
+                    open_entries,
+                    query,
+                    filter_tx,
+                    output_tx,
+                )
+                .await
+                .log_err();
+            }
+        });
+        const MAX_CONCURRENT_FILE_SCANS: usize = 64;
+        let filters = cx.background_executor().spawn(async move {
+            let fs = &fs;
+            let query = &query;
+            executor
+                .scoped(move |scope| {
+                    for _ in 0..MAX_CONCURRENT_FILE_SCANS {
+                        let filter_rx = filter_rx.clone();
+                        scope.spawn(async move {
+                            Self::filter_paths(fs, filter_rx, query).await.log_err();
+                        })
+                    }
+                })
+                .await;
+        });
+        cx.background_executor()
+            .spawn(async move {
+                let mut matched = 0;
+                while let Some(mut receiver) = output_rx.next().await {
+                    let Some(path) = receiver.next().await else {
+                        continue;
+                    };
+                    let Ok(_) = matching_paths_tx.send(path).await else {
+                        break;
+                    };
+                    matched += 1;
+                    if matched == limit {
+                        break;
+                    }
+                }
+                drop(input);
+                drop(filters);
+            })
+            .detach();
+        return matching_paths_rx;
+    }
+
+    async fn scan_ignored_dir(
+        fs: &Arc<dyn Fs>,
+        snapshot: &worktree::Snapshot,
+        path: &Path,
+        query: &SearchQuery,
+        filter_tx: &Sender<MatchingEntry>,
+        output_tx: &Sender<oneshot::Receiver<ProjectPath>>,
+    ) -> Result<()> {
+        let mut ignored_paths_to_process = VecDeque::from([snapshot.abs_path().join(&path)]);
+
+        while let Some(ignored_abs_path) = ignored_paths_to_process.pop_front() {
+            let metadata = fs
+                .metadata(&ignored_abs_path)
+                .await
+                .with_context(|| format!("fetching fs metadata for {ignored_abs_path:?}"))
+                .log_err()
+                .flatten();
+
+            let Some(fs_metadata) = metadata else {
+                continue;
+            };
+            if fs_metadata.is_dir {
+                let files = fs
+                    .read_dir(&ignored_abs_path)
+                    .await
+                    .with_context(|| format!("listing ignored path {ignored_abs_path:?}"))
+                    .log_err();
+
+                if let Some(mut subfiles) = files {
+                    while let Some(subfile) = subfiles.next().await {
+                        if let Some(subfile) = subfile.log_err() {
+                            ignored_paths_to_process.push_back(subfile);
+                        }
+                    }
+                }
+            } else if !fs_metadata.is_symlink {
+                if !query.file_matches(Some(&ignored_abs_path)) {
+                    continue;
+                }
+
+                let (tx, rx) = oneshot::channel();
+                output_tx.send(rx).await?;
+                filter_tx
+                    .send(MatchingEntry {
+                        respond: tx,
+                        worktree_path: snapshot.abs_path().clone(),
+                        path: ProjectPath {
+                            worktree_id: snapshot.id(),
+                            path: Arc::from(ignored_abs_path.strip_prefix(snapshot.abs_path())?),
+                        },
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn find_candidate_paths(
+        fs: Arc<dyn Fs>,
+        snapshots: Vec<(worktree::Snapshot, WorktreeSettings)>,
+        open_entries: HashSet<ProjectEntryId>,
+        query: SearchQuery,
+        filter_tx: Sender<MatchingEntry>,
+        output_tx: Sender<oneshot::Receiver<ProjectPath>>,
+    ) -> Result<()> {
+        let include_root = snapshots.len() > 1;
+        for (snapshot, settings) in snapshots {
+            for entry in snapshot.entries(query.include_ignored(), 0) {
+                if entry.is_dir() && entry.is_ignored {
+                    if !settings.is_path_excluded(&entry.path) {
+                        Self::scan_ignored_dir(
+                            &fs,
+                            &snapshot,
+                            &entry.path,
+                            &query,
+                            &filter_tx,
+                            &output_tx,
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+
+                if entry.is_fifo || !entry.is_file() {
+                    continue;
+                }
+
+                if open_entries.contains(&entry.id) {
+                    let (mut tx, rx) = oneshot::channel();
+                    tx.send(ProjectPath {
+                        worktree_id: snapshot.id(),
+                        path: entry.path.clone(),
+                    })
+                    .await?;
+                    output_tx.send(rx).await?;
+                    continue;
+                }
+
+                if query.filters_path() {
+                    let matched_path = if include_root {
+                        let mut full_path = PathBuf::from(snapshot.root_name());
+                        full_path.push(&entry.path);
+                        query.file_matches(Some(&full_path))
+                    } else {
+                        query.file_matches(Some(&entry.path))
+                    };
+                    if !matched_path {
+                        continue;
+                    }
+                }
+
+                let (tx, rx) = oneshot::channel();
+                output_tx.send(rx).await?;
+                filter_tx
+                    .send(MatchingEntry {
+                        respond: tx,
+                        worktree_path: snapshot.abs_path().clone(),
+                        path: ProjectPath {
+                            worktree_id: snapshot.id(),
+                            path: entry.path.clone(),
+                        },
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn filter_paths(
+        fs: &Arc<dyn Fs>,
+        mut input: Receiver<MatchingEntry>,
+        query: &SearchQuery,
+    ) -> Result<()> {
+        while let Some(mut entry) = input.next().await {
+            let abs_path = entry.worktree_path.join(&entry.path.path);
+            let Some(file) = fs.open_sync(&abs_path).await.log_err() else {
+                continue;
+            };
+            if query.detect(file).unwrap_or(false) {
+                entry.respond.send(entry.path).await?
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn handle_create_project_entry(
