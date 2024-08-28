@@ -4916,7 +4916,6 @@ dependencies = [
  "sum_tree",
  "taffy",
  "thiserror",
- "time",
  "unicode-segmentation",
  "usvg",
  "util",
@@ -8312,9 +8311,9 @@ dependencies = [
  "db",
  "editor",
  "file_icons",
- "futures 0.3.30",
  "git",
  "gpui",
+ "indexmap 1.9.3",
  "language",
  "menu",
  "pretty_assertions",
@@ -14091,7 +14090,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.151.0"
+version = "0.152.0"
 dependencies = [
  "activity_indicator",
  "anyhow",
