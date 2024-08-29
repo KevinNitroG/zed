@@ -16,7 +16,7 @@ mod project_tests;
 pub mod search_history;
 mod yarn;
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 use async_trait::async_trait;
 use buffer_store::{BufferStore, BufferStoreEvent};
 use client::{
@@ -208,7 +208,6 @@ pub struct Project {
     worktree_store: Model<WorktreeStore>,
     buffer_store: Model<BufferStore>,
     _subscriptions: Vec<gpui::Subscription>,
-    shared_buffers: HashMap<proto::PeerId, HashSet<BufferId>>,
     #[allow(clippy::type_complexity)]
     loading_worktrees:
         HashMap<Arc<Path>, Shared<Task<Result<Model<Worktree>, Arc<anyhow::Error>>>>>,
@@ -665,6 +664,14 @@ impl DirectoryLister {
         }
     }
 
+    pub fn resolve_tilde<'a>(&self, path: &'a String, cx: &AppContext) -> Cow<'a, str> {
+        if self.is_local(cx) {
+            shellexpand::tilde(path)
+        } else {
+            Cow::from(path)
+        }
+    }
+
     pub fn default_query(&self, cx: &mut AppContext) -> String {
         if let DirectoryLister::Project(project) = self {
             if let Some(worktree) = project.read(cx).visible_worktrees(cx).next() {
@@ -807,7 +814,6 @@ impl Project {
                 collaborators: Default::default(),
                 worktree_store,
                 buffer_store,
-                shared_buffers: Default::default(),
                 loading_worktrees: Default::default(),
                 buffer_snapshots: Default::default(),
                 join_project_response_message_id: 0,
@@ -979,7 +985,6 @@ impl Project {
                 buffer_ordered_messages_tx: tx,
                 buffer_store: buffer_store.clone(),
                 worktree_store,
-                shared_buffers: Default::default(),
                 loading_worktrees: Default::default(),
                 active_entry: None,
                 collaborators: Default::default(),
@@ -1729,7 +1734,8 @@ impl Project {
         message: proto::ResharedProject,
         cx: &mut ModelContext<Self>,
     ) -> Result<()> {
-        self.shared_buffers.clear();
+        self.buffer_store
+            .update(cx, |buffer_store, _| buffer_store.forget_shared_buffers());
         self.set_collaborators_from_proto(message.collaborators, cx)?;
         self.metadata_changed(cx);
         cx.emit(Event::Reshared);
@@ -1799,13 +1805,14 @@ impl Project {
         if let ProjectClientState::Shared { remote_id, .. } = self.client_state {
             self.client_state = ProjectClientState::Local;
             self.collaborators.clear();
-            self.shared_buffers.clear();
             self.client_subscriptions.clear();
             self.worktree_store.update(cx, |store, cx| {
                 store.set_shared(false, cx);
             });
-            self.buffer_store
-                .update(cx, |buffer_store, cx| buffer_store.set_remote_id(None, cx));
+            self.buffer_store.update(cx, |buffer_store, cx| {
+                buffer_store.forget_shared_buffers();
+                buffer_store.set_remote_id(None, cx)
+            });
             self.client
                 .send(proto::UnshareProject {
                     project_id: remote_id,
@@ -2420,6 +2427,16 @@ impl Project {
             }
             BufferStoreEvent::MessageToReplicas(message) => {
                 self.client.send_dynamic(message.as_ref().clone()).log_err();
+            }
+            BufferStoreEvent::BufferDropped(buffer_id) => {
+                if let Some(ref ssh_session) = self.ssh_session {
+                    ssh_session
+                        .send(proto::CloseBuffer {
+                            project_id: 0,
+                            buffer_id: buffer_id.to_proto(),
+                        })
+                        .log_err();
+                }
             }
         }
     }
@@ -5432,6 +5449,11 @@ impl Project {
         })?;
 
         let mut child = smol::process::Command::new(command);
+        #[cfg(target_os = "windows")]
+        {
+            use smol::process::windows::CommandExt;
+            child.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+        }
 
         if let Some(working_dir_path) = working_dir_path {
             child.current_dir(working_dir_path);
@@ -7216,8 +7238,11 @@ impl Project {
     ) -> Receiver<SearchResult> {
         let (result_tx, result_rx) = smol::channel::unbounded();
 
-        let matching_buffers_rx =
-            self.search_for_candidate_buffers(&query, MAX_SEARCH_RESULT_FILES + 1, cx);
+        let matching_buffers_rx = if query.is_opened_only() {
+            self.sort_candidate_buffers(&query, cx)
+        } else {
+            self.search_for_candidate_buffers(&query, MAX_SEARCH_RESULT_FILES + 1, cx)
+        };
 
         cx.spawn(|_, cx| async move {
             let mut range_count = 0;
@@ -7295,6 +7320,48 @@ impl Project {
         }
     }
 
+    fn sort_candidate_buffers(
+        &mut self,
+        search_query: &SearchQuery,
+        cx: &mut ModelContext<Project>,
+    ) -> Receiver<Model<Buffer>> {
+        let worktree_store = self.worktree_store.read(cx);
+        let mut buffers = search_query
+            .buffers()
+            .into_iter()
+            .flatten()
+            .filter(|buffer| {
+                let b = buffer.read(cx);
+                if let Some(file) = b.file() {
+                    if !search_query.file_matches(file.path()) {
+                        return false;
+                    }
+                    if let Some(entry) = b
+                        .entry_id(cx)
+                        .and_then(|entry_id| worktree_store.entry_for_id(entry_id, cx))
+                    {
+                        if entry.is_ignored && !search_query.include_ignored() {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            })
+            .collect::<Vec<_>>();
+        let (tx, rx) = smol::channel::unbounded();
+        buffers.sort_by(|a, b| match (a.read(cx).file(), b.read(cx).file()) {
+            (None, None) => a.read(cx).remote_id().cmp(&b.read(cx).remote_id()),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) => compare_paths((a.path(), true), (b.path(), true)),
+        });
+        for buffer in buffers {
+            tx.send_blocking(buffer.clone()).unwrap()
+        }
+
+        rx
+    }
+
     fn search_for_candidate_buffers_remote(
         &mut self,
         query: &SearchQuery,
@@ -7317,7 +7384,7 @@ impl Project {
             query: Some(query.to_proto()),
             limit: limit as _,
         });
-        let guard = self.retain_remotely_created_buffers();
+        let guard = self.retain_remotely_created_buffers(cx);
 
         cx.spawn(move |this, mut cx| async move {
             let response = request.await?;
@@ -8543,7 +8610,9 @@ impl Project {
 
         let collaborator = Collaborator::from_proto(collaborator)?;
         this.update(&mut cx, |this, cx| {
-            this.shared_buffers.remove(&collaborator.peer_id);
+            this.buffer_store.update(cx, |buffer_store, _| {
+                buffer_store.forget_shared_buffers_for(&collaborator.peer_id);
+            });
             cx.emit(Event::CollaboratorJoined(collaborator.peer_id));
             this.collaborators
                 .insert(collaborator.peer_id, collaborator);
@@ -8574,16 +8643,10 @@ impl Project {
             let is_host = collaborator.replica_id == 0;
             this.collaborators.insert(new_peer_id, collaborator);
 
-            let buffers = this.shared_buffers.remove(&old_peer_id);
-            log::info!(
-                "peer {} became {}. moving buffers {:?}",
-                old_peer_id,
-                new_peer_id,
-                &buffers
-            );
-            if let Some(buffers) = buffers {
-                this.shared_buffers.insert(new_peer_id, buffers);
-            }
+            log::info!("peer {} became {}", old_peer_id, new_peer_id,);
+            this.buffer_store.update(cx, |buffer_store, _| {
+                buffer_store.update_peer_id(&old_peer_id, new_peer_id)
+            });
 
             if is_host {
                 this.buffer_store
@@ -8618,11 +8681,11 @@ impl Project {
                 .ok_or_else(|| anyhow!("unknown peer {:?}", peer_id))?
                 .replica_id;
             this.buffer_store.update(cx, |buffer_store, cx| {
+                buffer_store.forget_shared_buffers_for(&peer_id);
                 for buffer in buffer_store.buffers() {
                     buffer.update(cx, |buffer, cx| buffer.remove_peer(replica_id, cx));
                 }
             });
-            this.shared_buffers.remove(&peer_id);
 
             cx.emit(Event::CollaboratorLeft(peer_id));
             cx.notify();
@@ -8835,8 +8898,17 @@ impl Project {
         BufferStore::handle_update_buffer(buffer_store, envelope, cx).await
     }
 
-    fn retain_remotely_created_buffers(&mut self) -> RemotelyCreatedBufferGuard {
-        self.remotely_created_buffers.lock().retain_count += 1;
+    fn retain_remotely_created_buffers(
+        &mut self,
+        cx: &mut ModelContext<Self>,
+    ) -> RemotelyCreatedBufferGuard {
+        {
+            let mut remotely_created_buffers = self.remotely_created_buffers.lock();
+            if remotely_created_buffers.retain_count == 0 {
+                remotely_created_buffers.buffers = self.buffer_store.read(cx).buffers().collect();
+            }
+            remotely_created_buffers.retain_count += 1;
+        }
         RemotelyCreatedBufferGuard {
             remote_buffers: Arc::downgrade(&self.remotely_created_buffers),
         }
@@ -8888,86 +8960,11 @@ impl Project {
         envelope: TypedEnvelope<proto::SynchronizeBuffers>,
         mut cx: AsyncAppContext,
     ) -> Result<proto::SynchronizeBuffersResponse> {
-        let project_id = envelope.payload.project_id;
-        let mut response = proto::SynchronizeBuffersResponse {
-            buffers: Default::default(),
-        };
-
-        this.update(&mut cx, |this, cx| {
-            let Some(guest_id) = envelope.original_sender_id else {
-                error!("missing original_sender_id on SynchronizeBuffers request");
-                bail!("missing original_sender_id on SynchronizeBuffers request");
-            };
-
-            this.shared_buffers.entry(guest_id).or_default().clear();
-            for buffer in envelope.payload.buffers {
-                let buffer_id = BufferId::new(buffer.id)?;
-                let remote_version = language::proto::deserialize_version(&buffer.version);
-                if let Some(buffer) = this.buffer_for_id(buffer_id, cx) {
-                    this.shared_buffers
-                        .entry(guest_id)
-                        .or_default()
-                        .insert(buffer_id);
-
-                    let buffer = buffer.read(cx);
-                    response.buffers.push(proto::BufferVersion {
-                        id: buffer_id.into(),
-                        version: language::proto::serialize_version(&buffer.version),
-                    });
-
-                    let operations = buffer.serialize_ops(Some(remote_version), cx);
-                    let client = this.client.clone();
-                    if let Some(file) = buffer.file() {
-                        client
-                            .send(proto::UpdateBufferFile {
-                                project_id,
-                                buffer_id: buffer_id.into(),
-                                file: Some(file.to_proto(cx)),
-                            })
-                            .log_err();
-                    }
-
-                    client
-                        .send(proto::UpdateDiffBase {
-                            project_id,
-                            buffer_id: buffer_id.into(),
-                            diff_base: buffer.diff_base().map(ToString::to_string),
-                        })
-                        .log_err();
-
-                    client
-                        .send(proto::BufferReloaded {
-                            project_id,
-                            buffer_id: buffer_id.into(),
-                            version: language::proto::serialize_version(buffer.saved_version()),
-                            mtime: buffer.saved_mtime().map(|time| time.into()),
-                            line_ending: language::proto::serialize_line_ending(
-                                buffer.line_ending(),
-                            ) as i32,
-                        })
-                        .log_err();
-
-                    cx.background_executor()
-                        .spawn(
-                            async move {
-                                let operations = operations.await;
-                                for chunk in split_operations(operations) {
-                                    client
-                                        .request(proto::UpdateBuffer {
-                                            project_id,
-                                            buffer_id: buffer_id.into(),
-                                            operations: chunk,
-                                        })
-                                        .await?;
-                                }
-                                anyhow::Ok(())
-                            }
-                            .log_err(),
-                        )
-                        .detach();
-                }
-            }
-            Ok(())
+        let response = this.update(&mut cx, |this, cx| {
+            let client = this.client.clone();
+            this.buffer_store.update(cx, |this, cx| {
+                this.handle_synchronize_buffers(envelope, cx, client)
+            })
         })??;
 
         Ok(response)
@@ -9795,35 +9792,20 @@ impl Project {
         peer_id: proto::PeerId,
         cx: &mut AppContext,
     ) -> BufferId {
-        let buffer_id = buffer.read(cx).remote_id();
-        if !self
-            .shared_buffers
-            .entry(peer_id)
-            .or_default()
-            .insert(buffer_id)
-        {
-            return buffer_id;
+        if let Some(project_id) = self.remote_id() {
+            self.buffer_store
+                .update(cx, |buffer_store, cx| {
+                    buffer_store.create_buffer_for_peer(
+                        buffer,
+                        peer_id,
+                        project_id,
+                        self.client.clone().into(),
+                        cx,
+                    )
+                })
+                .detach_and_log_err(cx);
         }
-        let ProjectClientState::Shared { remote_id } = self.client_state else {
-            return buffer_id;
-        };
-        let buffer_store = self.buffer_store.clone();
-        let client = self.client().clone();
-
-        cx.spawn(|mut cx| async move {
-            BufferStore::create_buffer_for_peer(
-                buffer_store,
-                peer_id,
-                buffer_id,
-                remote_id,
-                client.clone().into(),
-                &mut cx,
-            )
-            .await?;
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
-        buffer_id
+        buffer.read(cx).remote_id()
     }
 
     fn wait_for_remote_buffer(
