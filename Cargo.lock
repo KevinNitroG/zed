@@ -243,6 +243,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "collections",
  "futures 0.3.30",
  "http_client",
  "isahc",
@@ -372,6 +373,7 @@ dependencies = [
  "anyhow",
  "assets",
  "assistant_slash_command",
+ "assistant_tool",
  "async-watch",
  "cargo_toml",
  "chrono",
@@ -450,6 +452,20 @@ dependencies = [
  "language",
  "parking_lot",
  "serde",
+ "workspace",
+]
+
+[[package]]
+name = "assistant_tool"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "derive_more",
+ "gpui",
+ "parking_lot",
+ "serde",
+ "serde_json",
  "workspace",
 ]
 
@@ -14196,7 +14212,7 @@ dependencies = [
 
 [[package]]
 name = "zed"
-version = "0.152.0"
+version = "0.153.0"
 dependencies = [
  "activity_indicator",
  "anyhow",
