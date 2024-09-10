@@ -115,7 +115,6 @@ struct EntryDetails {
     is_cut: bool,
     git_status: Option<GitFileStatus>,
     is_private: bool,
-    is_auto_folded: bool,
     worktree_id: WorktreeId,
     canonical_path: Option<Box<Path>>,
 }
@@ -2099,7 +2098,6 @@ impl ProjectPanel {
                             .map_or(false, |e| e.is_cut() && e.items().contains(&selection)),
                         git_status: status,
                         is_private: entry.is_private,
-                        is_auto_folded: difference > 1,
                         worktree_id: *worktree_id,
                         canonical_path: entry.canonical_path.clone(),
                     };
@@ -2212,7 +2210,6 @@ impl ProjectPanel {
             active_selection: selection,
             marked_selections: selections,
         };
-        let is_auto_folded = details.is_auto_folded;
         div()
             .id(entry_id.to_proto() as usize)
             .on_drag_move::<ExternalPaths>(cx.listener(
@@ -2314,8 +2311,9 @@ impl ProjectPanel {
                             h_flex().h_6().w_full().child(editor.clone())
                         } else {
                             h_flex().h_6().map(|this| {
-                                if is_auto_folded && is_active {
-                                    let folded_ancestors = self.ancestors.get(&entry_id).unwrap();
+                                if let Some(folded_ancestors) =
+                                    is_active.then(|| self.ancestors.get(&entry_id)).flatten()
+                                {
                                     let Some(part_to_highlight) = Path::new(&file_name)
                                         .ancestors()
                                         .nth(folded_ancestors.current_ancestor_depth)
@@ -3519,9 +3517,9 @@ mod tests {
                 "    > .git",
                 "    > a",
                 "    v b",
-                "        > [EDITOR: '']  <== selected",
                 "        > 3",
                 "        > 4",
+                "        > [EDITOR: '']  <== selected",
                 "          a-different-filename.tar.gz",
                 "    > C",
                 "      .dockerignore",
@@ -3542,10 +3540,10 @@ mod tests {
                 "    > .git",
                 "    > a",
                 "    v b",
-                "        > [PROCESSING: 'new-dir']",
-                "        > 3  <== selected",
+                "        > 3",
                 "        > 4",
-                "          a-different-filename.tar.gz",
+                "        > [PROCESSING: 'new-dir']",
+                "          a-different-filename.tar.gz  <== selected",
                 "    > C",
                 "      .dockerignore",
             ]
@@ -3559,10 +3557,10 @@ mod tests {
                 "    > .git",
                 "    > a",
                 "    v b",
-                "        > 3  <== selected",
+                "        > 3",
                 "        > 4",
                 "        > new-dir",
-                "          a-different-filename.tar.gz",
+                "          a-different-filename.tar.gz  <== selected",
                 "    > C",
                 "      .dockerignore",
             ]
@@ -3576,10 +3574,10 @@ mod tests {
                 "    > .git",
                 "    > a",
                 "    v b",
-                "        > [EDITOR: '3']  <== selected",
+                "        > 3",
                 "        > 4",
                 "        > new-dir",
-                "          a-different-filename.tar.gz",
+                "          [EDITOR: 'a-different-filename.tar.gz']  <== selected",
                 "    > C",
                 "      .dockerignore",
             ]
@@ -3594,10 +3592,10 @@ mod tests {
                 "    > .git",
                 "    > a",
                 "    v b",
-                "        > 3  <== selected",
+                "        > 3",
                 "        > 4",
                 "        > new-dir",
-                "          a-different-filename.tar.gz",
+                "          a-different-filename.tar.gz  <== selected",
                 "    > C",
                 "      .dockerignore",
             ]
@@ -3844,8 +3842,8 @@ mod tests {
             &[
                 //
                 "v root1",
-                "      one.two.txt  <== selected",
-                "      one.txt",
+                "      one.txt  <== selected",
+                "      one.two.txt",
             ]
         );
 
@@ -3862,9 +3860,9 @@ mod tests {
             &[
                 //
                 "v root1",
-                "      one.two copy.txt  <== selected",
-                "      one.two.txt",
                 "      one.txt",
+                "      one copy.txt  <== selected",
+                "      one.two.txt",
             ]
         );
 
@@ -3878,10 +3876,10 @@ mod tests {
             &[
                 //
                 "v root1",
-                "      one.two copy 1.txt  <== selected",
-                "      one.two copy.txt",
-                "      one.two.txt",
                 "      one.txt",
+                "      one copy.txt",
+                "      one copy 1.txt  <== selected",
+                "      one.two.txt",
             ]
         );
     }
@@ -4074,8 +4072,8 @@ mod tests {
                 "    > b",
                 "      four.txt",
                 "      one.txt",
-                "      three copy.txt  <== selected",
                 "      three.txt",
+                "      three copy.txt  <== selected",
                 "      two.txt",
             ]
         );
@@ -4105,8 +4103,8 @@ mod tests {
                 "    > b",
                 "      four.txt",
                 "      one.txt",
-                "      three copy.txt",
                 "      three.txt",
+                "      three copy.txt",
                 "      two.txt",
             ]
         );
