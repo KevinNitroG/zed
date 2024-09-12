@@ -3,7 +3,7 @@ use crate::{
     environment::ProjectEnvironment,
     lsp_command::{self, *},
     lsp_ext_command,
-    project_settings::ProjectSettings,
+    project_settings::{LspSettings, ProjectSettings},
     relativize_path, resolve_path,
     worktree_store::{WorktreeStore, WorktreeStoreEvent},
     yarn::YarnPathStore,
@@ -26,7 +26,6 @@ use gpui::{
     Task, WeakModel,
 };
 use http_client::{AsyncBody, Error, HttpClient, Request, Response, Uri};
-use itertools::Itertools;
 use language::{
     language_settings::{
         all_language_settings, language_settings, AllLanguageSettings, LanguageSettings,
@@ -4489,14 +4488,6 @@ impl LspStore {
             );
         }
 
-        log::info!(
-            "starting language servers for {language}: {adapters}",
-            adapters = enabled_lsp_adapters
-                .iter()
-                .map(|adapter| adapter.name.0.as_ref())
-                .join(", ")
-        );
-
         for adapter in &enabled_lsp_adapters {
             self.start_language_server(worktree, adapter.clone(), language.clone(), cx);
         }
@@ -7044,6 +7035,23 @@ impl HttpClient for BlockedHttpClient {
         None
     }
 }
+
+pub fn language_server_settings<'a, 'b: 'a>(
+    delegate: &'a dyn LspAdapterDelegate,
+    language: &str,
+    cx: &'b AppContext,
+) -> Option<&'a LspSettings> {
+    ProjectSettings::get(
+        Some(SettingsLocation {
+            worktree_id: delegate.worktree_id(),
+            path: delegate.worktree_root_path(),
+        }),
+        cx,
+    )
+    .lsp
+    .get(language)
+}
+
 #[async_trait]
 impl LspAdapterDelegate for ProjectLspAdapterDelegate {
     fn show_notification(&self, message: &str, cx: &mut AppContext) {
