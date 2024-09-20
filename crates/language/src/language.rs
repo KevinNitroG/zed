@@ -94,7 +94,7 @@ where
     let mut parser = PARSERS.lock().pop().unwrap_or_else(|| {
         let mut parser = Parser::new();
         parser
-            .set_wasm_store(WasmStore::new(WASM_ENGINE.clone()).unwrap())
+            .set_wasm_store(WasmStore::new(&WASM_ENGINE).unwrap())
             .unwrap();
         parser
     });
@@ -208,7 +208,7 @@ impl CachedLspAdapter {
 
     pub async fn get_language_server_command(
         self: Arc<Self>,
-        container_dir: Arc<Path>,
+        container_dir: Option<Arc<Path>>,
         delegate: Arc<dyn LspAdapterDelegate>,
         cx: &mut AsyncAppContext,
     ) -> Result<LanguageServerBinary> {
@@ -270,11 +270,6 @@ impl CachedLspAdapter {
             .cloned()
             .unwrap_or_else(|| language_name.lsp_id())
     }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn as_fake(&self) -> Option<&FakeLspAdapter> {
-        self.adapter.as_fake()
-    }
 }
 
 /// [`LspAdapterDelegate`] allows [`LspAdapter]` implementations to interface with the application
@@ -290,6 +285,7 @@ pub trait LspAdapterDelegate: Send + Sync {
     async fn which(&self, command: &OsStr) -> Option<PathBuf>;
     async fn shell_env(&self) -> HashMap<String, String>;
     async fn read_text_file(&self, path: PathBuf) -> Result<String>;
+    async fn try_exec(&self, binary: LanguageServerBinary) -> Result<()>;
 }
 
 #[async_trait(?Send)]
@@ -298,7 +294,7 @@ pub trait LspAdapter: 'static + Send + Sync {
 
     fn get_language_server_command<'a>(
         self: Arc<Self>,
-        container_dir: Arc<Path>,
+        container_dir: Option<Arc<Path>>,
         delegate: Arc<dyn LspAdapterDelegate>,
         mut cached_binary: futures::lock::MutexGuard<'a, Option<LanguageServerBinary>>,
         cx: &'a mut AsyncAppContext,
@@ -328,6 +324,10 @@ pub trait LspAdapter: 'static + Send + Sync {
             if let Some(cached_binary) = cached_binary.as_ref() {
                 return Ok(cached_binary.clone());
             }
+
+            let Some(container_dir) = container_dir else {
+                anyhow::bail!("cannot download language servers for remotes (yet)")
+            };
 
             if !container_dir.exists() {
                 smol::fs::create_dir_all(&container_dir)
@@ -507,11 +507,6 @@ pub trait LspAdapter: 'static + Send + Sync {
 
     fn language_ids(&self) -> HashMap<String, String> {
         Default::default()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn as_fake(&self) -> Option<&FakeLspAdapter> {
-        None
     }
 }
 
@@ -751,12 +746,13 @@ where
 pub struct FakeLspAdapter {
     pub name: &'static str,
     pub initialization_options: Option<Value>,
-    pub capabilities: lsp::ServerCapabilities,
-    pub initializer: Option<Box<dyn 'static + Send + Sync + Fn(&mut lsp::FakeLanguageServer)>>,
+    pub prettier_plugins: Vec<&'static str>,
     pub disk_based_diagnostics_progress_token: Option<String>,
     pub disk_based_diagnostics_sources: Vec<String>,
-    pub prettier_plugins: Vec<&'static str>,
     pub language_server_binary: LanguageServerBinary,
+
+    pub capabilities: lsp::ServerCapabilities,
+    pub initializer: Option<Box<dyn 'static + Send + Sync + Fn(&mut lsp::FakeLanguageServer)>>,
 }
 
 /// Configuration of handling bracket pairs for a given language.
@@ -1494,6 +1490,13 @@ impl LanguageScope {
         }
     }
 
+    pub fn override_name(&self) -> Option<&str> {
+        let id = self.override_id?;
+        let grammar = self.language.grammar.as_ref()?;
+        let override_config = grammar.override_config.as_ref()?;
+        override_config.values.get(&id).map(|e| e.0.as_str())
+    }
+
     fn config_override(&self) -> Option<&LanguageConfigOverride> {
         let id = self.override_id?;
         let grammar = self.language.grammar.as_ref()?;
@@ -1665,7 +1668,7 @@ impl LspAdapter for FakeLspAdapter {
 
     fn get_language_server_command<'a>(
         self: Arc<Self>,
-        _: Arc<Path>,
+        _: Option<Arc<Path>>,
         _: Arc<dyn LspAdapterDelegate>,
         _: futures::lock::MutexGuard<'a, Option<LanguageServerBinary>>,
         _: &'a mut AsyncAppContext,
@@ -1717,10 +1720,6 @@ impl LspAdapter for FakeLspAdapter {
     ) -> Result<Option<Value>> {
         Ok(self.initialization_options.clone())
     }
-
-    fn as_fake(&self) -> Option<&FakeLspAdapter> {
-        Some(self)
-    }
 }
 
 fn get_capture_indices(query: &Query, captures: &mut [(&str, &mut Option<u32>)]) {
@@ -1768,8 +1767,8 @@ mod tests {
         let languages = LanguageRegistry::test(cx.executor());
         let languages = Arc::new(languages);
         languages.register_native_grammars([
-            ("json", tree_sitter_json::language()),
-            ("rust", tree_sitter_rust::language()),
+            ("json", tree_sitter_json::LANGUAGE),
+            ("rust", tree_sitter_rust::LANGUAGE),
         ]);
         languages.register_test_language(LanguageConfig {
             name: "JSON".into(),
