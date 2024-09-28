@@ -821,8 +821,8 @@ impl SelectionHistory {
 
 struct RowHighlight {
     index: usize,
-    range: RangeInclusive<Anchor>,
-    color: Option<Hsla>,
+    range: Range<Anchor>,
+    color: Hsla,
     should_autoscroll: bool,
 }
 
@@ -5368,6 +5368,19 @@ impl Editor {
                     .icon_size(IconSize::XSmall)
                     .icon_color(Color::Muted)
                     .selected(is_active)
+                    .tooltip({
+                        let focus_handle = self.focus_handle.clone();
+                        move |cx| {
+                            Tooltip::for_action_in(
+                                "Toggle Code Actions",
+                                &ToggleCodeActions {
+                                    deployed_from_indicator: None,
+                                },
+                                &focus_handle,
+                                cx,
+                            )
+                        }
+                    })
                     .on_click(cx.listener(move |editor, _e, cx| {
                         editor.focus(cx);
                         editor.toggle_code_actions(
@@ -11500,39 +11513,116 @@ impl Editor {
         }
     }
 
-    /// Adds or removes (on `None` color) a highlight for the rows corresponding to the anchor range given.
-    /// On matching anchor range, replaces the old highlight; does not clear the other existing highlights.
-    /// If multiple anchor ranges will produce highlights for the same row, the last range added will be used.
+    /// Adds a row highlight for the given range. If a row has multiple highlights, the
+    /// last highlight added will be used.
+    ///
+    /// If the range ends at the beginning of a line, then that line will not be highlighted.
     pub fn highlight_rows<T: 'static>(
         &mut self,
-        rows: RangeInclusive<Anchor>,
-        color: Option<Hsla>,
+        range: Range<Anchor>,
+        color: Hsla,
         should_autoscroll: bool,
         cx: &mut ViewContext<Self>,
     ) {
         let snapshot = self.buffer().read(cx).snapshot(cx);
         let row_highlights = self.highlighted_rows.entry(TypeId::of::<T>()).or_default();
-        let existing_highlight_index = row_highlights.binary_search_by(|highlight| {
-            highlight
-                .range
-                .start()
-                .cmp(rows.start(), &snapshot)
-                .then(highlight.range.end().cmp(rows.end(), &snapshot))
+        let ix = row_highlights.binary_search_by(|highlight| {
+            Ordering::Equal
+                .then_with(|| highlight.range.start.cmp(&range.start, &snapshot))
+                .then_with(|| highlight.range.end.cmp(&range.end, &snapshot))
         });
-        match (color, existing_highlight_index) {
-            (Some(_), Ok(ix)) | (_, Err(ix)) => row_highlights.insert(
-                ix,
-                RowHighlight {
-                    index: post_inc(&mut self.highlight_order),
-                    range: rows,
-                    should_autoscroll,
-                    color,
-                },
-            ),
-            (None, Ok(i)) => {
-                row_highlights.remove(i);
+
+        if let Err(mut ix) = ix {
+            let index = post_inc(&mut self.highlight_order);
+
+            // If this range intersects with the preceding highlight, then merge it with
+            // the preceding highlight. Otherwise insert a new highlight.
+            let mut merged = false;
+            if ix > 0 {
+                let prev_highlight = &mut row_highlights[ix - 1];
+                if prev_highlight
+                    .range
+                    .end
+                    .cmp(&range.start, &snapshot)
+                    .is_ge()
+                {
+                    ix -= 1;
+                    if prev_highlight.range.end.cmp(&range.end, &snapshot).is_lt() {
+                        prev_highlight.range.end = range.end;
+                    }
+                    merged = true;
+                    prev_highlight.index = index;
+                    prev_highlight.color = color;
+                    prev_highlight.should_autoscroll = should_autoscroll;
+                }
+            }
+
+            if !merged {
+                row_highlights.insert(
+                    ix,
+                    RowHighlight {
+                        range: range.clone(),
+                        index,
+                        color,
+                        should_autoscroll,
+                    },
+                );
+            }
+
+            // If any of the following highlights intersect with this one, merge them.
+            while let Some(next_highlight) = row_highlights.get(ix + 1) {
+                let highlight = &row_highlights[ix];
+                if next_highlight
+                    .range
+                    .start
+                    .cmp(&highlight.range.end, &snapshot)
+                    .is_le()
+                {
+                    if next_highlight
+                        .range
+                        .end
+                        .cmp(&highlight.range.end, &snapshot)
+                        .is_gt()
+                    {
+                        row_highlights[ix].range.end = next_highlight.range.end;
+                    }
+                    row_highlights.remove(ix + 1);
+                } else {
+                    break;
+                }
             }
         }
+    }
+
+    /// Remove any highlighted row ranges of the given type that intersect the
+    /// given ranges.
+    pub fn remove_highlighted_rows<T: 'static>(
+        &mut self,
+        ranges_to_remove: Vec<Range<Anchor>>,
+        cx: &mut ViewContext<Self>,
+    ) {
+        let snapshot = self.buffer().read(cx).snapshot(cx);
+        let row_highlights = self.highlighted_rows.entry(TypeId::of::<T>()).or_default();
+        let mut ranges_to_remove = ranges_to_remove.iter().peekable();
+        row_highlights.retain(|highlight| {
+            while let Some(range_to_remove) = ranges_to_remove.peek() {
+                match range_to_remove.end.cmp(&highlight.range.start, &snapshot) {
+                    Ordering::Less | Ordering::Equal => {
+                        ranges_to_remove.next();
+                    }
+                    Ordering::Greater => {
+                        match range_to_remove.start.cmp(&highlight.range.end, &snapshot) {
+                            Ordering::Less | Ordering::Equal => {
+                                return false;
+                            }
+                            Ordering::Greater => break,
+                        }
+                    }
+                }
+            }
+
+            true
+        })
     }
 
     /// Clear all anchor ranges for a certain highlight context type, so no corresponding rows will be highlighted.
@@ -11541,15 +11631,12 @@ impl Editor {
     }
 
     /// For a highlight given context type, gets all anchor ranges that will be used for row highlighting.
-    pub fn highlighted_rows<T: 'static>(
-        &self,
-    ) -> Option<impl Iterator<Item = (&RangeInclusive<Anchor>, Option<&Hsla>)>> {
-        Some(
-            self.highlighted_rows
-                .get(&TypeId::of::<T>())?
-                .iter()
-                .map(|highlight| (&highlight.range, highlight.color.as_ref())),
-        )
+    pub fn highlighted_rows<T: 'static>(&self) -> impl '_ + Iterator<Item = (Range<Anchor>, Hsla)> {
+        self.highlighted_rows
+            .get(&TypeId::of::<T>())
+            .map_or(&[] as &[_], |vec| vec.as_slice())
+            .iter()
+            .map(|highlight| (highlight.range.clone(), highlight.color))
     }
 
     /// Merges all anchor ranges for all context types ever set, picking the last highlight added in case of a row conflict.
@@ -11567,17 +11654,22 @@ impl Editor {
             .fold(
                 BTreeMap::<DisplayRow, Hsla>::new(),
                 |mut unique_rows, highlight| {
-                    let start_row = highlight.range.start().to_display_point(&snapshot).row();
-                    let end_row = highlight.range.end().to_display_point(&snapshot).row();
-                    for row in start_row.0..=end_row.0 {
+                    let start = highlight.range.start.to_display_point(&snapshot);
+                    let end = highlight.range.end.to_display_point(&snapshot);
+                    let start_row = start.row().0;
+                    let end_row = if highlight.range.end.text_anchor != text::Anchor::MAX
+                        && end.column() == 0
+                    {
+                        end.row().0.saturating_sub(1)
+                    } else {
+                        end.row().0
+                    };
+                    for row in start_row..=end_row {
                         let used_index =
                             used_highlight_orders.entry(row).or_insert(highlight.index);
                         if highlight.index >= *used_index {
                             *used_index = highlight.index;
-                            match highlight.color {
-                                Some(hsla) => unique_rows.insert(DisplayRow(row), hsla),
-                                None => unique_rows.remove(&DisplayRow(row)),
-                            };
+                            unique_rows.insert(DisplayRow(row), highlight.color);
                         }
                     }
                     unique_rows
@@ -11593,10 +11685,11 @@ impl Editor {
             .values()
             .flat_map(|highlighted_rows| highlighted_rows.iter())
             .filter_map(|highlight| {
-                if highlight.color.is_none() || !highlight.should_autoscroll {
-                    return None;
+                if highlight.should_autoscroll {
+                    Some(highlight.range.start.to_display_point(snapshot).row())
+                } else {
+                    None
                 }
-                Some(highlight.range.start().to_display_point(snapshot).row())
             })
             .min()
     }
